@@ -66,7 +66,7 @@ This repo is designed to be useful for:
 │           ├── training_features.json
 │           └── training_features.csv
 │
-├── LCDataDictionary.xlsx            # LendingClub official feature dictionary
+├── LCDataDictionary.xlsx           # LendingClub official feature dictionary
 ├── .gitattributes                  # Git LFS config for model files
 ├── .gitignore
 └── README.md                       # ← you are here
