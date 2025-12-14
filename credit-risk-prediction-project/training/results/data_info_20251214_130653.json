@@ -1,0 +1,12 @@
+{
+  "total_rows": 358244,
+  "default_rate": 0.17452630051026674,
+  "n_defaults": 62523,
+  "n_good": 295721,
+  "date_range": {
+    "min": "2013-01-01",
+    "max": "2014-12-01"
+  },
+  "sample_size_used": null,
+  "training_mode": "full"
+}
