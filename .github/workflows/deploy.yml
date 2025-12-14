@@ -1,10 +1,9 @@
 name: Sync to Hugging Face hub
-
 on:
   push:
     branches: [main]
+# to run this workflow manually from the Actions tab
   workflow_dispatch:
-
 jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
@@ -13,10 +12,7 @@ jobs:
         with:
           fetch-depth: 0
           lfs: true
-
-      - name: Push to Hugging Face
+      - name: Push to hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          git remote add hf https://priscillaashleyw:${HF_TOKEN}@huggingface.co/spaces/priscillaashleyw/CreditShield.git
-          git push hf main
+        run: git push --force https://priscillaashleyw:$HF_TOKEN@huggingface.co/spaces/priscillaashleyw/CreditShield main
