@@ -1,21 +1,28 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
 
+# Prevent Python from writing .pyc files and buffer stdout
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Set the working directory
 WORKDIR /app
 
-# System deps (if needed for shap/xgboost – often helpful)
+# Copy only the deployment code (and artifacts) into the image
+COPY deployment ./deployment
+
+# Install system dependencies (needed for some Python packages like xgboost)
 RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies for deployment
+RUN pip install --no-cache-dir -r deployment/requirements.txt
 
-COPY . .
+# Switch into the deployment folder
+WORKDIR /app/deployment
 
-# Gradio typically runs on 7860 by default
+# Expose Gradio's default port
 EXPOSE 7860
 
-ENV GRADIO_SERVER_NAME="0.0.0.0"
-ENV GRADIO_SERVER_PORT=7860
-
-CMD ["python", "app.py"]
+# Command to run the Gradio app
+CMD ["python", "gradio_app.py"]
