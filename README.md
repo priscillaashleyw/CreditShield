@@ -205,7 +205,7 @@ print(result)
 
 ---
 
-## 📈 Model Performance
+## Model Performance
 
 | Metric      | Score                             |
 | ----------- | --------------------------------- |
