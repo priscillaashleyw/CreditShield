@@ -297,15 +297,3 @@ print(result)
 ## 📜 License
 
 Apache 2.0
-
----
-
-## ✨ Author & Purpose
-
-This project demonstrates:
-- Research replication done *properly*
-- Strong ML engineering practices
-- Realistic deployment constraints
-
-If you’re reviewing this as a recruiter, researcher, or engineer:  
-**everything from feature leakage prevention to inference robustness is intentional.**
