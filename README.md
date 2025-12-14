@@ -1,6 +1,6 @@
 # Credit Risk Prediction System
 
-### *Enhancing the 2022 paper: “Credit scoring for peer-to-peer lending using machine learning techniques”*
+### *Enhancing the 2022 paper: “Machine learning and artificial neural networks to construct P2P lending credit-scoring model: A case using Lending Club data”*
 
 This project replicates and significantly improves the methodology from the 2022 Quantitative Finance & Economics paper on P2P loan credit scoring.
 Using **358,244 LendingClub loans (2013–2014)**, the system predicts loan defaults with **92.3% AUC-ROC**, exceeding the paper’s 86–87% result.
