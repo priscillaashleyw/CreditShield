@@ -1,0 +1,2 @@
+deployment/model_artifacts/*.pkl
+deployment/model_artifacts/*.joblib
