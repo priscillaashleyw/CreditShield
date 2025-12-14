@@ -1,28 +1,22 @@
 FROM python:3.10-slim
 
-# Prevent Python from writing .pyc files and buffer stdout
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Set the working directory
 WORKDIR /app
 
-# Copy only the deployment code (and artifacts) into the image
-COPY deployment ./deployment
-
-# Install system dependencies (needed for some Python packages like xgboost)
-RUN apt-get update && apt-get install -y \
+# System deps (xgboost often needs build tools on slim)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies for deployment
-RUN pip install --no-cache-dir -r deployment/requirements.txt
+# Copy only the deployment folder (nested in your repo)
+COPY credit-risk-prediction-project/deployment ./deployment
 
-# Switch into the deployment folder
+# Install deps
+RUN pip install --no-cache-dir -r /app/deployment/requirements.txt
+
 WORKDIR /app/deployment
-
-# Expose Gradio's default port
 EXPOSE 7860
 
-# Command to run the Gradio app
 CMD ["python", "gradio_app.py"]
