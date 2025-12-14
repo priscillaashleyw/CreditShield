@@ -1,184 +1,248 @@
-# Credit Risk Prediction System
+# 🏦 Credit Risk Prediction System (End-to-End ML + Deployment)
 
-### *Enhancing the 2022 paper: “Machine learning and artificial neural networks to construct P2P lending credit-scoring model: A case using Lending Club data”*
-
-This project replicates and significantly improves the methodology from the 2022 Quantitative Finance & Economics paper on P2P loan credit scoring.
-Using **358,244 LendingClub loans (2013–2014)**, the system predicts loan defaults with **92.3% AUC-ROC**, exceeding the paper’s 86–87% result.
-
-The full ML pipeline includes data loading, preprocessing, feature engineering, model training, Bayesian optimization, business threshold optimization, and a deployable Gradio web app.
+> **A production-ready credit risk prediction system** that replicates and significantly improves a 2022 academic paper on P2P lending credit scoring, with a full training pipeline, business-aware threshold optimization, and an auto-deployed Gradio web app on Hugging Face Spaces.
 
 ---
 
-## Repository Structure
+## 🔍 Project Overview
+
+This repository contains an **end-to-end machine learning system for predicting loan default risk** using LendingClub data. The project:
+
+- Replicates the 2022 paper:  
+  *“Machine learning and artificial neural networks to construct P2P lending credit-scoring model: A case using Lending Club data”*  
+  (*Quantitative Finance & Economics*)
+- **Improves AUC-ROC from ~86–87% to 92.3%**
+- Uses **time-based validation**, extensive feature engineering, and **profit-optimized decision thresholds**
+- Provides a **fully deployable Gradio application**, automatically synced to Hugging Face via GitHub Actions
+
+This repo is designed to be useful for:
+- ML / data science portfolios
+- Research replication & extension
+- Demonstrating production ML (training → artifacts → inference → deployment)
+
+---
+
+## 🧠 Key Highlights
+
+- **92.3% AUC-ROC** on 358,244 real loans
+- **No undersampling** (handles real-world class imbalance)
+- **40+ engineered features** (ratios, flags, NLP title features)
+- **Bayesian hyperparameter optimization**
+- **Business-aware threshold optimization** (profit-maximizing, not accuracy-maximizing)
+- **Single-source-of-truth feature list** shared between training & inference
+- **Auto-deployed Gradio app** via GitHub → Hugging Face Spaces
+- **Dockerized deployment** for reproducibility
+
+---
+
+## 📁 Repository Structure
 
 ```
-credit-risk-prediction/
+.
+├── .github/workflows/
+│   └── deploy.yml                  # CI: sync deployment/ to Hugging Face
 │
-├── training/
-│   ├── train.py
-│   ├── train_models.py
-│   ├── load_data.py
-│   ├── build_features.py
-│   ├── find_features.py
-│   ├── inspect_model.py
-│   ├── config.py
-│   └── requirements.txt
+├── credit-risk-prediction-project/
+│   ├── training/                   # Model training & experimentation
+│   │   ├── train.py
+│   │   ├── train_models.py
+│   │   ├── load_data.py
+│   │   ├── build_features.py
+│   │   ├── find_features.py
+│   │   ├── inspect_model.py
+│   │   ├── config.py
+│   │   └── requirements.txt
+│   │
+│   └── deployment/                 # Production inference & UI
+│       ├── app.py                  # Gradio app (same as gradio_app.py)
+│       ├── predictor.py            # Feature engineering + inference pipeline
+│       ├── requirements.txt
+│       ├── Dockerfile
+│       ├── README.md               # Hugging Face Space metadata
+│       └── model_artifacts/
+│           ├── xgb_best_model.pkl
+│           ├── scaler.pkl
+│           ├── imputer.pkl
+│           ├── training_features.json
+│           └── training_features.csv
 │
-├── deployment/
-│   ├── predictor.py
-│   ├── gradio_app.py
-│   ├── model_artifacts/
-│   │     ├── model_xgb.pkl
-│   │     ├── scaler.pkl
-│   │     ├── imputer.pkl
-│   │     └── training_features.json
-│   └── requirements.txt
-│
-├── data/                         
-├── models/                       
-└── results/                      
+├── LCDataDictionary.xlsx            # LendingClub official feature dictionary
+├── .gitattributes                  # Git LFS config for model files
+├── .gitignore
+└── README.md                       # ← you are here
 ```
 
 ---
 
-## Installation
+## 📊 Dataset
 
-### 1. Install training environment
+- **Source**: LendingClub public loan dataset
+- **File**: `accepted_2007_to_2018Q4.csv` (not included)
+- **Filtered period**: **2013–2014**
+- **Final sample size**: **358,244 loans**
+- **Target**: Loan default / charged-off status
+
+> 📘 `LCDataDictionary.xlsx` provides the official meaning of all LendingClub variables used in training and feature engineering.
+
+---
+
+## 🧪 Methodology
+
+### Replicated from the Paper
+
+- Core credit variables (DTI, FICO, utilization, balances)
+- Logistic Regression, Random Forest, XGBoost baselines
+- Feature importance–based selection
+- No class rebalancing
+
+### Improvements in This Project
+
+| Area | Improvement |
+|----|----|
+| Validation | **Time-based split** (no leakage) |
+| Features | 40+ engineered features |
+| Categoricals | One-hot encoded state, purpose, home ownership |
+| NLP | Loan title keyword + length features |
+| Optimization | Bayesian hyperparameter tuning |
+| Decisioning | **Profit-maximizing threshold (0.28)** |
+| Deployment | Shared feature contract + Gradio UI |
+
+---
+
+## 🛠 Feature Engineering (Overview)
+
+### Examples of Engineered Features
+
+| Category | Examples |
+|-------|---------|
+| Financial ratios | `loan_to_income`, `int_rate_times_loan` |
+| Credit behavior | `has_delinq_history`, `subprime_high_dti` |
+| Credit history | `years_since_earliest_cr` |
+| NLP (title) | `title_has_debt`, `title_word_count` |
+| One-hot | `addr_state_CA`, `purpose_debt_consolidation` |
+
+🔑 **Important**:  
+All features used during training are saved to:
+
+```
+credit-risk-prediction-project/deployment/model_artifacts/training_features.json
+```
+
+This file is treated as the **single source of truth** for inference.
+
+---
+
+## 🚂 Training the Model
+
+### Environment Setup
 
 ```bash
-cd training
+cd credit-risk-prediction-project/training
 pip install -r requirements.txt
 ```
 
-### 2. Install deployment environment
-
-```bash
-cd deployment
-pip install -r requirements.txt
-```
-
----
-
-## Dataset
-
-* LendingClub **accepted_2007_to_2018Q4.csv**
-* Filtered to **2013–2014**
-* Removed incomplete statuses
-* → **358,244 final rows**
-
----
-
-## Methodology
-
-### Replicated from the original paper:
-
-* Use of FICO, DTI, utilization, credit history variables
-* Logistic Regression, XGBoost, Random Forest
-* Feature selection via XGBoost gain
-* No undersampling
-
-### Improvements implemented:
-
-* **Time-based split** instead of random
-* **40+ engineered features**
-* **NLP title features**
-* **Interaction terms** + financial ratios
-* **One-hot encoding** for purpose/state/home ownership
-* **Bayesian Optimization (scikit-optimize)**
-* **Business profit-max threshold (0.28)**
-* **Deployable inference pipeline + Gradio app**
-
----
-
-## Feature Engineering
-
-### Paper’s 16 features:
-
-Includes:
-`dti`, `annual_inc`, `avg_cur_bal`, `total_bc_limit`,
-`revol_util`, `revol_bal`, `fico_range_low`, `last_fico_range_high`,
-`mths_since_recent_bc`, `mo_sin_old_rev_tl_op`, etc.
-
-### Enhanced 40+ features:
-
-| Category             | Examples                                             |
-| -------------------- | ---------------------------------------------------- |
-| Financial ratios     | `loan_to_income`, `int_rate_times_loan`              |
-| Behavioral flags     | `has_delinq_history`, `subprime_high_dti`            |
-| NLP features         | `title_has_debt`, `title_length`, `title_word_count` |
-| Encoded categoricals | `addr_state_CA`, `purpose_debt_consolidation`        |
-| Credit history time  | `years_since_earliest_cr`                            |
-
-All training features are saved to:
-
-```
-deployment/model_artifacts/training_features.json
-```
-
----
-
-## Training the Model
-
-In the `training/` folder:
+### Run Training
 
 ```bash
 python train.py --full
 ```
 
-### Training modes:
+#### Training Modes
 
-| Mode            | Description                   |
-| --------------- | ----------------------------- |
-| `--quick`       | Fast training mode            |
-| `--full`        | Full training + optimization  |
-| `--sample N`    | Use N rows                    |
-| `--no-optimize` | Disable Bayesian optimization |
-| `--no-viz`      | Skip visualization            |
+| Flag | Description |
+|----|------------|
+| `--quick` | Fast dev run |
+| `--full` | Full training + optimization |
+| `--sample N` | Train on N rows |
+| `--no-optimize` | Skip Bayesian tuning |
+| `--no-viz` | Skip plots |
 
-### Outputs saved:
+### Outputs
 
-* Trained model (`model_xgb.pkl`)
-* `scaler.pkl`, `imputer.pkl`
-* Feature list JSON
-* ROC/PR curves
-* Profit analysis CSV
-* Model comparison tables
+- Trained XGBoost model
+- Scaler & imputer
+- Feature list JSON/CSV
+- ROC & PR curves
+- Profit-by-threshold analysis
 
----
+Artifacts intended for deployment should be copied to:
 
-## Business Threshold Optimization
-
-The model evaluates thresholds from 0.10 to 0.90 and computes:
-
-* Profit from approving good borrowers
-* Loss from approving bad borrowers
-* Cost of rejecting good borrowers
-
-The **optimal threshold = 0.28**, which is used in deployment.
-
----
-
-## Running the Gradio App
-
-In the `deployment/` folder:
-
-```bash
-python gradio_app.py
+```
+credit-risk-prediction-project/deployment/model_artifacts/
 ```
 
-### App Features:
+---
 
-* User-friendly sliders + dropdowns
-* Predicts APPROVE / REJECT
-* Shows default probability
-* Shows risk level + confidence
-* Business explanation
-* Colored risk bar visualization
-* Example presets (low / high risk)
+## 💰 Business Threshold Optimization
+
+Instead of using a default 0.5 cutoff, the model:
+
+- Simulates **profit vs loss** across thresholds 0.10–0.90
+- Accounts for:
+  - Approving good borrowers
+  - Approving bad borrowers (loss)
+  - Rejecting good borrowers (opportunity cost)
+
+✅ **Optimal threshold**: **0.28**  
+This threshold is **hard-coded into the predictor and UI**.
 
 ---
 
-## Prediction API (programmatic use)
+## 🚀 Running the Gradio App (Local)
+
+### Option 1: Python
+
+```bash
+cd credit-risk-prediction-project/deployment
+pip install -r requirements.txt
+python app.py
+```
+
+Open: http://localhost:7860
+
+### Option 2: Docker
+
+```bash
+docker build -t credit-risk-app .
+docker run -p 7860:7860 credit-risk-app
+```
+
+---
+
+## 🌐 Hugging Face Deployment (Auto)
+
+This repo includes a **GitHub Actions workflow** that:
+
+- Watches for changes in `deployment/`
+- Uses `git subtree` to push **only deployment/**
+- Syncs automatically to a Hugging Face Space
+
+📁 Workflow file:
+```
+.github/workflows/deploy.yml
+```
+
+This ensures:
+- Clean separation of training vs deployment
+- No accidental leakage of training code or raw data
+
+---
+
+## 🧩 Predictor Architecture (Important)
+
+`predictor.py` implements a **production-safe inference pipeline**:
+
+1. Accepts raw user input
+2. Infers missing fields with safe defaults
+3. Recreates **all engineered & one-hot features**
+4. Orders features to exactly match training
+5. Applies imputer → scaler → model
+
+This avoids common deployment failures due to feature mismatch.
+
+---
+
+## 🧪 Programmatic Usage
 
 ```python
 from predictor import CreditRiskPredictor
@@ -196,7 +260,12 @@ loan = {
     "delinq_2yrs": 0,
     "inq_last_6mths": 2,
     "open_acc": 8,
-    "total_acc": 25
+    "total_acc": 25,
+    "addr_state": "CA",
+    "purpose": "debt_consolidation",
+    "home_ownership": "RENT",
+    "verification_status": "Verified",
+    "title": "Debt consolidation loan"
 }
 
 result = predictor.predict(loan)
@@ -205,30 +274,38 @@ print(result)
 
 ---
 
-## Model Performance
+## 📈 Model Performance
 
-| Metric      | Score                             |
-| ----------- | --------------------------------- |
-| **AUC-ROC** | **92.3%**                         |
-| AUC-PR      | Strong performance with imbalance |
-| Best model  | Optimized XGBoost                 |
-| Validation  | Time-based split                  |
-
----
-
-## Notes
-
-* Raw LendingClub dataset is excluded (large file).
-* Place trained artifacts into:
-
-```
-deployment/model_artifacts/
-```
-
-* For research & educational use only.
+| Metric | Value |
+|----|----|
+| AUC-ROC | **92.3%** |
+| Validation | Time-based |
+| Model | Optimized XGBoost |
+| Threshold | 0.28 (profit-max) |
 
 ---
 
-## License
+## ⚠️ Notes & Limitations
+
+- Raw LendingClub data is **not included**
+- Model is trained on **historical data (2013–2014)**
+- For **research & educational use only**
+- Not financial or lending advice
+
+---
+
+## 📜 License
 
 Apache 2.0
+
+---
+
+## ✨ Author & Purpose
+
+This project demonstrates:
+- Research replication done *properly*
+- Strong ML engineering practices
+- Realistic deployment constraints
+
+If you’re reviewing this as a recruiter, researcher, or engineer:  
+**everything from feature leakage prevention to inference robustness is intentional.**
