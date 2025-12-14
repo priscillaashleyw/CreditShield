@@ -1,18 +1,33 @@
-name: Sync to Hugging Face hub
+name: Sync deployment/ to Hugging Face hub
+
 on:
   push:
     branches: [main]
-# to run this workflow manually from the Actions tab
+    paths:
+      - "deployment/**"
+      - ".github/workflows/**"
   workflow_dispatch:
+
 jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: true
-      - name: Push to hub
+
+      - name: Push ONLY deployment/ to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push --force https://priscillaashleyw:$HF_TOKEN@huggingface.co/spaces/priscillaashleyw/CreditShield main
+        run: |
+          set -e
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          # Create a branch that contains ONLY the deployment/ folder at repo root
+          git subtree split --prefix deployment -b hf-deploy
+
+          # Push that branch to the Space's main branch (force updates the Space)
+          git push --force https://priscillaashleyw:${HF_TOKEN}@huggingface.co/spaces/priscillaashleyw/CreditShield hf-deploy:main
