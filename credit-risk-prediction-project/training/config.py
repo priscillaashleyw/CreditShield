@@ -22,21 +22,18 @@ CONFIG = {
         # Use all data (None) or sample for testing (e.g., 100000)
         'sample_size': None,
         
-        # Essential columns to load (based on paper's feature selection)
+        # Essential columns to load (based on paper's feature selection; removed leakage columns)
         'essential_columns': [
             # Loan information
-            'loan_amnt', 'int_rate', 'term', 'grade', 'sub_grade', 'emp_title',
-            'emp_length', 'home_ownership', 'annual_inc', 'verification_status',
-            'issue_d', 'loan_status', 'purpose', 'title', 'zip_code', 'addr_state',
+            'loan_amnt', 'int_rate', 'term', 'emp_title', 'emp_length', 'home_ownership', 
+            'annual_inc', 'verification_status', 'issue_d', 'loan_status', 'purpose', 
+            'title', 'zip_code', 'addr_state',
             
             # Financial ratios
             'dti', 'delinq_2yrs', 'earliest_cr_line', 'inq_last_6mths',
-            'mths_since_last_delinq', 'mths_since_last_record',
-            'open_acc', 'pub_rec', 'revol_bal', 'revol_util',
-            'total_acc', 'initial_list_status', 'out_prncp', 'out_prncp_inv',
-            'total_pymnt', 'total_pymnt_inv', 'total_rec_prncp',
-            'total_rec_int', 'total_rec_late_fee', 'recoveries',
-            'collection_recovery_fee', 'last_pymnt_d', 'last_pymnt_amnt',
+            'mths_since_last_delinq', 'mths_since_last_record', 'open_acc', 
+            'pub_rec', 'revol_bal', 'revol_util', 'total_acc', 
+            'initial_list_status',
             
             # FICO scores (paper's most important features)
             'last_fico_range_high', 'last_fico_range_low',
@@ -57,6 +54,14 @@ CONFIG = {
             'pub_rec_bankruptcies', 'tax_liens', 'tot_hi_cred_lim',
             'total_bal_ex_mort', 'total_bc_limit', 'total_il_high_credit_limit'
         ],
+
+        # Leaked columns to remove
+        'leaked_columns': [
+            'total_pymnt', 'total_pymnt_inv', 'recoveries', 'last_pymnt_amnt', 
+            'last_pymnt_d', 'collection_recovery_fee', 'out_prncp', 'out_prncp_inv',
+            'total_rec_prncp', 'total_rec_int', 'total_rec_late_fee', 'grade', 'sub_grade'
+        ],
+
         
         # Paper filters out incomplete loan statuses
         'incomplete_statuses': [
