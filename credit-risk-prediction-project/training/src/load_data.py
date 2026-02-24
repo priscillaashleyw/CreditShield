@@ -90,8 +90,6 @@ class DataLoader:
                 low_memory=False
             )
             print(f"✓ Loaded {len(df):,} rows, {len(df.columns)} columns")
-    
-    # Rest of the function remains the same...
         
         # Convert dates
         df['issue_date'] = pd.to_datetime(df['issue_d'], format='%b-%Y', errors='coerce')
@@ -110,7 +108,39 @@ class DataLoader:
         
         print(f"✓ Removed incomplete loans: {len(df):,} remaining")
         print(f"Date range: {df['issue_date'].min().date()} to {df['issue_date'].max().date()}")
+
+        # Remove Post-Origination Leakage Columns (from config)
+        leakage_cols = set(self.config['data_settings'].get('leaked_columns', []))
+
+        present_leakage = leakage_cols.intersection(df.columns)
+        if present_leakage:
+            print(f"⚠️ Dropping leakage columns from config: {present_leakage}")
+            df = df.drop(columns=list(present_leakage), errors="ignore")
+
+        # Handle structural missingness for columns with high % of missing values ("months since last X" bureau events)
+        # In this case, Missing usually means "never happened"
+        structural_missing_cols = [
+            "mths_since_last_delinq",
+            "mths_since_last_major_derog",
+            "mths_since_last_record",
+        ]
+
+        for col in structural_missing_cols:
+            if col in df.columns:
+                df[f"{col}_missing"] = df[col].isna().astype("int8")
+                df[col] = df[col].fillna(999).astype("int16", errors="ignore")
         
+        # Transform heavy-tailed variables
+        if 'annual_inc' in df.columns:
+            df['annual_inc'] = np.log1p(df['annual_inc'])
+
+        if 'revol_bal' in df.columns:
+            df['revol_bal'] = np.log1p(df['revol_bal'])
+
+        # Clip utilization (robustness; outlier handling)
+        if 'revol_util' in df.columns:
+            df['revol_util'] = df['revol_util'].clip(upper=120)
+
         return df
     
     def define_target(self, df, strategy='business'):
