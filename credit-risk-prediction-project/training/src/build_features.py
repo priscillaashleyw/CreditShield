@@ -7,6 +7,7 @@ import re
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 import warnings
+from textblob import TextBlob
 warnings.filterwarnings('ignore')
 
 class FeatureEngineer:
@@ -36,10 +37,12 @@ class FeatureEngineer:
         # 3. Convert revol_util from percentage to decimal
         df['revol_util_decimal'] = df['revol_util'].astype(str).str.replace('%', '').astype(float) / 100
         
-        # 4. Convert earliest credit line to years from reference date (as per paper)
-        reference_date = pd.Timestamp('2018-09-01')  # September 2018 as per paper
+        # 4. Convert earliest credit line to years from issue date
+        # reference paper used reference date of September 2018, but we will calculate based on issue date 
+        # since we want to preserve semantic meaning of "years since earliest credit line" at the time of loan issuance
         df['earliest_cr_line_date'] = pd.to_datetime(df['earliest_cr_line'], format='%b-%Y', errors='coerce')
-        df['years_since_earliest_cr'] = (reference_date - df['earliest_cr_line_date']).dt.days / 365.25
+        df['issue_date'] = pd.to_datetime(df['issue_d'], errors='coerce')
+        df['years_since_earliest_cr'] = ((df['issue_date'] - df['earliest_cr_line_date']).dt.days / 365.25)
         
         # 5. Create missing value indicators as per paper
         # For features like 'mths_since_last_delinq' where NA means no delinquency
@@ -61,16 +64,46 @@ class FeatureEngineer:
         # 7. Create interaction terms (our improvement)
         df['loan_to_income'] = df['loan_amnt'] / (df['annual_inc'] + 1)
         df['int_rate_times_loan'] = df['int_rate'] * df['loan_amnt'] / 1000
-        df['subprime_high_dti'] = ((df['grade_numeric'] >= 4) & (df['dti'] > 20)).astype(int)
+
+        # This feature captures how much of the borrower's monthly income would go towards the loan installment, which is a critical factor in credit risk assessment. 
+        # A higher value indicates a higher burden on the borrower, which could correlate with higher default risk.
+        df['installment_to_income'] = 12 * df['installment'] / (df['annual_inc'] + 1) # add 1 to prevent division by zero
+
+        # This feature captures the combined effect of the borrower's existing debt burden (DTI) and the new loan's monthly payment. 
+        # It provides insight into how much of the borrower's monthly income would be consumed by all debt obligations, including the new loan. 
+        # A higher value indicates a higher overall debt burden, which could correlate with higher default risk.
+        df['dti_with_new_loan'] = ((df['dti'] * df['annual_inc']/12) + df['monthly_payment']) / (df['annual_inc']/12) * 100
+
         
         # 8. Create text-based features from loan title (NLP improvement)
+        # title has 63154 columns - not categorical
         if 'title' in df.columns:
+            # length features
             df['title_length'] = df['title'].astype(str).str.len()
             df['title_word_count'] = df['title'].astype(str).str.split().str.len()
+
             # Simple keyword extraction
-            keywords = ['debt', 'consolidation', 'credit', 'card', 'medical', 'home', 'car']
-            for keyword in keywords:
-                df[f'title_has_{keyword}'] = df['title'].astype(str).str.contains(keyword, case=False).astype(int)
+            # keywords = ['debt', 'consolidation', 'credit', 'card', 'medical', 'home', 'car']
+            risk_keywords = [
+                'medical','hospital','surgery',
+                'bill','expenses','emergency',
+                'consolidat','payoff','collection',
+                'business','startup',
+                'tuition','school',
+                'moving','relocat'
+            ]
+
+            # Create binary features for presence of risk keywords in title
+            for keyword in risk_keywords:
+                df[f'title_has_{keyword}'] = df['title'].astype(str).str.contains(keyword, case=False, na=False).astype(int)
+
+            # Create a feature that captures if the title contains risk keywords but the purpose is "other" (potentially indicating hidden risk)
+            df['title_keyword_other'] = ((df['purpose'] == 'other') & df['title'].astype(str).str.contains(
+                '|'.join(risk_keywords), case=False, na=False)).astype(int)
+
+        # perform simple sentiment analysis using TextBlob to extract polarity and subjectivity as features
+        df['title_polarity'] = df['title'].apply(lambda x: TextBlob(x).sentiment.polarity)
+        df['title_subjectivity'] = df['title'].apply(lambda x: TextBlob(x).sentiment.subjectivity)
         
         print(f"✓ Created {len([c for c in df.columns if 'target' not in c])} features total")
         return df
@@ -194,3 +227,4 @@ class FeatureEngineer:
         }).sort_values('importance', ascending=False)
         
         return feat_imp
+    
