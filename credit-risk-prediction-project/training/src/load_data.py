@@ -7,13 +7,64 @@ from pathlib import Path
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
+import subprocess
 
 class DataLoader:
     """Handles data loading and preprocessing with paper's methodology"""
     
     def __init__(self, config):
         self.config = config
-        self.data_path = Path(config['paths']['raw_data'])
+        raw = config['paths']['raw_data']
+        # If raw is a Kaggle URI, store it + set local cache path
+        if isinstance(raw, str) and raw.startswith("kaggle://"):
+            self.kaggle_uri = raw 
+            filename = raw.split("/")[-1]
+            self.data_path = Path("training/data") / filename
+        else:
+            self.kaggle_uri = None
+            self.data_path = Path(raw)
+    
+    def _ensure_raw_data(self):
+        if self.data_path.exists():
+            return
+
+        if not self.kaggle_uri:
+            raise FileNotFoundError(f"Data file not found: {self.data_path}")
+
+        # Parse kaggle:/<owner>/<dataset>/<file>
+        parts = self.kaggle_uri.replace("kaggle://", "").split("/")
+        if len(parts) < 3:
+            raise ValueError(f"Invalid Kaggle URI: {self.kaggle_uri}")
+
+        dataset = "/".join(parts[:2])   # owner/dataset
+        filename = "/".join(parts[2:])  # handle any extra slashes safely
+        dest_dir = self.data_path.parent
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"Downloading from Kaggle: {dataset} (file={filename}) ...")
+        import shutil
+
+        kaggle_exe = shutil.which("kaggle")
+        if not kaggle_exe:
+            raise FileNotFoundError(
+                "Kaggle CLI not found on PATH. Try: pip install kaggle and restart terminal."
+            )
+
+        subprocess.run(
+            [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
+            check=True
+)
+
+        # After unzip, ensure the expected file exists
+        if not self.data_path.exists():
+            # fallback: pick any CSV in dest_dir
+            csvs = list(dest_dir.glob("*.csv"))
+            if not csvs:
+                csvs = list(dest_dir.rglob("*.csv"))
+            if not csvs:
+                raise FileNotFoundError(f"No CSV found after Kaggle download into {dest_dir}")
+            csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+            csvs[0].rename(self.data_path)
         
     def load_and_filter_data(self):
         """
@@ -22,8 +73,7 @@ class DataLoader:
         print("Loading data according to paper methodology...")
         
         # Check if file exists
-        if not self.data_path.exists():
-            raise FileNotFoundError(f"Data file not found: {self.data_path}")
+        self._ensure_raw_data()
         
         # Load data with optimized memory usage
         essential_cols = self.config['data_settings']['essential_columns']

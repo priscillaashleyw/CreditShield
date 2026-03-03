@@ -7,7 +7,7 @@ Paper: "Credit scoring for peer-to-peer lending using machine learning technique
 CONFIG = {
     # Paths and directories
     'paths': {
-        'raw_data': 'data/accepted_2007_to_2018Q4.csv',
+        'raw_data': 'kaggle://wordsforthewise/lending-club/accepted_2007_to_2018Q4.csv',
         'models_dir': 'models',
         'results_dir': 'results',
         'logs_dir': 'logs',
