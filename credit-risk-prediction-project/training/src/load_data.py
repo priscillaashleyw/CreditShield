@@ -50,10 +50,34 @@ class DataLoader:
                 "Kaggle CLI not found on PATH. Try: pip install kaggle and restart terminal."
             )
 
-        subprocess.run(
-            [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
-            check=True
-)
+        try:
+            result = subprocess.run(
+                [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            print(result.stdout)
+        except subprocess.CalledProcessError as e:
+            print(f"Kaggle download failed: {e.stderr}")
+            print("\n" + "=" * 60)
+            print("MANUAL DOWNLOAD INSTRUCTIONS:")
+            print("=" * 60)
+            print(f"1. Go to: https://www.kaggle.com/datasets/{dataset}")
+            print(f"2. Click 'Download' button")
+            print(f"3. Extract the CSV file to: {dest_dir}")
+            print(f"4. Rename the file to: {self.data_path.name}")
+            print("=" * 60)
+            print("\nAlternatively, set up Kaggle API credentials:")
+            print("  1. Go to https://www.kaggle.com/settings/account")
+            print("  2. Click 'Create New Token' under API section")
+            print("  3. Save kaggle.json to ~/.kaggle/kaggle.json")
+            print("  4. Run: chmod 600 ~/.kaggle/kaggle.json")
+            print("=" * 60 + "\n")
+            raise FileNotFoundError(
+                f"Could not download dataset. Please download manually from "
+                f"https://www.kaggle.com/datasets/{dataset}"
+            )
 
         # After unzip, ensure the expected file exists
         if not self.data_path.exists():
@@ -64,7 +88,11 @@ class DataLoader:
             if not csvs:
                 raise FileNotFoundError(f"No CSV found after Kaggle download into {dest_dir}")
             csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
-            csvs[0].rename(self.data_path)
+            # Use the largest CSV (most likely the main data file)
+            largest_csv = csvs[0]
+            print(f"Found CSV: {largest_csv.name}, using as data source")
+            if largest_csv != self.data_path:
+                largest_csv.rename(self.data_path)
         
     def load_and_filter_data(self):
         """

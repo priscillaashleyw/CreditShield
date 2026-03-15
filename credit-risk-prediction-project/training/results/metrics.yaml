@@ -1,0 +1,13 @@
+model_type: TabTransformer
+output_type: probability (0-1)
+optimal_threshold: 0.486
+auc: 0.5089
+accuracy: 0.6316
+precision: 0.6316
+recall: 1.0000
+f1: 0.7742
+mae: 0.5003
+true_positives: 48
+true_negatives: 0
+false_positives: 28
+false_negatives: 0
