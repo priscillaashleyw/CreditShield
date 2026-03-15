@@ -9,11 +9,11 @@ matplotlib==3.9.2
 # UI
 streamlit>=1.38.0
 
-# LLM stack (你队友的)
+# LLM stack
 langgraph>=0.2.0
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
 
-# 原来的
 gradio>=6.0.0
 huggingface_hub>=1.0.0
+protobuf<5
