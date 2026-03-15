@@ -19,25 +19,38 @@ class DataLoader:
         if isinstance(raw, str) and raw.startswith("kaggle://"):
             self.kaggle_uri = raw 
             filename = raw.split("/")[-1]
-            self.data_path = Path("training/data") / filename
+            self.data_path = Path("data") / filename
         else:
             self.kaggle_uri = None
             self.data_path = Path(raw)
     
     def _ensure_raw_data(self):
-        if self.data_path.exists():
+        # Case 1: exact file already exists
+        if self.data_path.exists() and self.data_path.is_file():
+            return
+
+        # Case 2: path exists but is a directory -> find CSV inside
+        if self.data_path.exists() and self.data_path.is_dir():
+            csvs = list(self.data_path.glob("*.csv"))
+            if not csvs:
+                csvs = list(self.data_path.rglob("*.csv"))
+            if not csvs:
+                raise FileNotFoundError(f"No CSV found inside directory: {self.data_path}")
+            csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+            self.data_path = csvs[0]
+            print(f"✓ Resolved data file inside directory: {self.data_path}")
             return
 
         if not self.kaggle_uri:
             raise FileNotFoundError(f"Data file not found: {self.data_path}")
 
-        # Parse kaggle:/<owner>/<dataset>/<file>
+        # Parse kaggle://<owner>/<dataset>/<file>
         parts = self.kaggle_uri.replace("kaggle://", "").split("/")
         if len(parts) < 3:
             raise ValueError(f"Invalid Kaggle URI: {self.kaggle_uri}")
 
-        dataset = "/".join(parts[:2])   # owner/dataset
-        filename = "/".join(parts[2:])  # handle any extra slashes safely
+        dataset = "/".join(parts[:2])
+        filename = "/".join(parts[2:])
         dest_dir = self.data_path.parent
         dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -53,19 +66,42 @@ class DataLoader:
         subprocess.run(
             [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
             check=True
-)
+        )
 
-        # After unzip, ensure the expected file exists
-        if not self.data_path.exists():
-            # fallback: pick any CSV in dest_dir
-            csvs = list(dest_dir.glob("*.csv"))
+        # First try exact file
+        if self.data_path.exists() and self.data_path.is_file():
+            return
+
+        # If exact path is now a directory, resolve file inside it
+        if self.data_path.exists() and self.data_path.is_dir():
+            csvs = list(self.data_path.glob("*.csv"))
             if not csvs:
-                csvs = list(dest_dir.rglob("*.csv"))
+                csvs = list(self.data_path.rglob("*.csv"))
             if not csvs:
-                raise FileNotFoundError(f"No CSV found after Kaggle download into {dest_dir}")
+                raise FileNotFoundError(f"No CSV found inside downloaded directory: {self.data_path}")
             csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
-            csvs[0].rename(self.data_path)
-        
+            self.data_path = csvs[0]
+            print(f"✓ Resolved downloaded CSV: {self.data_path}")
+            return
+
+        # Fallback: search anywhere in destination
+        csvs = list(dest_dir.glob("*.csv"))
+        if not csvs:
+            csvs = list(dest_dir.rglob("*.csv"))
+        if not csvs:
+            raise FileNotFoundError(f"No CSV found after Kaggle download into {dest_dir}")
+
+        # Prefer the requested filename if possible
+        filename_only = Path(filename).name.lower()
+        matching = [p for p in csvs if p.name.lower() == filename_only]
+        if matching:
+            self.data_path = matching[0]
+        else:
+            csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+            self.data_path = csvs[0]
+
+        print(f"✓ Using discovered CSV: {self.data_path}")
+            
     def load_and_filter_data(self):
         """
         Load and filter data according to paper specifications
@@ -187,8 +223,14 @@ class DataLoader:
         if 'revol_bal' in df.columns:
             df['revol_bal'] = np.log1p(df['revol_bal'])
 
-        # Clip utilization (robustness; outlier handling)
         if 'revol_util' in df.columns:
+            df['revol_util'] = (
+                df['revol_util']
+                .astype(str)
+                .str.replace('%', '', regex=False)
+                .replace('nan', np.nan)
+            )
+            df['revol_util'] = pd.to_numeric(df['revol_util'], errors='coerce')
             df['revol_util'] = df['revol_util'].clip(upper=120)
 
         return df
