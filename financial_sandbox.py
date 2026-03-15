@@ -1,254 +1,300 @@
 import os
 import sys
-from typing import TypedDict, Annotated, List, Dict, Any
+import json
+from typing import TypedDict, Annotated, List, Dict, Any, Optional
+
+# Make predictor.py importable without installing the deployment package
+sys.path.insert(0, os.path.join(os.path.dirname(__file__),
+                                "credit-risk-prediction-project/deployment"))
+from predictor import CreditRiskPredictor
+
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage,ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
-from gradio_client import Client
-import json
+from langchain_core.tools import tool, InjectedToolArg
 
 # --- CONFIGURATION ---
-# Check for OpenAI API Key
-os.environ["OPENAI_API_BASE"] = "https://openrouter.ai/api/v1"
-os.environ["OPENAI_API_KEY"] = ""
-if "OPENAI_API_KEY" not in os.environ:
-    print("⚠️  OPENAI_API_KEY not found in environment variables.")
-    print("Please set it: export OPENAI_API_KEY='sk-...'")
-    # For demo purposes, we might let it fail if not set, 
-    # or prompt the user (but in this non-interactive shell we can't).
+if not os.environ.get("OPENAI_API_KEY"):
+    print("⚠️  OPENAI_API_KEY not set. Run: export OPENAI_API_KEY='sk-or-v1-...'")
+    sys.exit(1)
 
-# --- FEATURE MAPPING ---
-# Maps feature names to their index in the API list [0..28]
-FEATURE_MAP = {
-    'loan_amnt': 0, 'int_rate': 1, 'grade': 2, 'emp_length': 3, 'annual_inc': 4,
-    'dti': 5, 'revol_util': 6, 'delinq_2yrs': 7, 'inq_last_6mths': 8, 'open_acc': 9,
-    'total_acc': 10, 'revol_bal': 11, 'total_bc_limit': 12, 'total_bal_ex_mort': 13,
-    'avg_cur_bal': 14, 'mo_sin_old_il_acct': 15, 'mo_sin_old_rev_tl_op': 16,
-    'mo_sin_rcnt_rev_tl_op': 17, 'mths_since_recent_bc': 18, 'mths_since_recent_inq': 19,
-    'pct_tl_nvr_dlq': 20, 'last_fico_range_low': 21, 'last_fico_range_high': 22,
-    'years_since_earliest_cr': 23, 'addr_state': 24, 'home_ownership': 25,
-    'purpose': 26, 'verification_status': 27, 'title': 28
+# --- FEATURE DEFINITIONS ---
+# Ordered dict matching the Gradio /predict_loan parameter order exactly.
+FEATURE_DEFAULTS: Dict[str, Any] = {
+    'loan_amnt': 15000,
+    'int_rate': 12.5,
+    'grade': 'C',
+    'emp_length': '5 years',
+    'annual_inc': 75000,
+    'dti': 18.5,
+    'revol_util': 45,
+    'delinq_2yrs': 0,
+    'inq_last_6mths': 2,
+    'open_acc': 8,
+    'total_acc': 25,
+    'revol_bal': 5000,
+    'total_bc_limit': 20000,
+    'total_bal_ex_mort': 30000,
+    'avg_cur_bal': 2500,
+    'mo_sin_old_il_acct': 60,
+    'mo_sin_old_rev_tl_op': 48,
+    'mo_sin_rcnt_rev_tl_op': 12,
+    'mths_since_recent_bc': 6,
+    'mths_since_recent_inq': 3,
+    'pct_tl_nvr_dlq': 95,
+    'last_fico_range_low': 680,
+    'last_fico_range_high': 684,
+    'years_since_earliest_cr': 10,
+    'addr_state': 'CA',
+    'home_ownership': 'RENT',
+    'purpose': 'debt_consolidation',
+    'verification_status': 'Verified',
+    'title': 'Debt consolidation loan',
 }
 
-# Default profile (Baseline)
-DEFAULT_PROFILE = [
-    15000, 12.5, "C", "5 years", 75000, 18.5, 45, 0, 2, 8, 25, 
-    5000, 20000, 30000, 2500, 60, 48, 12, 6, 3, 95, 680, 684, 
-    10, "CA", "RENT", "debt_consolidation", "Verified", "Debt consolidation loan"
-]
+# --- PREDICTOR (module-level, loaded once) ---
+_predictor = CreditRiskPredictor(
+    os.path.join(os.path.dirname(__file__),
+                 "credit-risk-prediction-project/deployment/model_artifacts")
+)
 
-# --- STATE MANAGEMENT ---
+def _profile_to_predictor_input(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert our internal profile dict to the format predictor.py expects."""
+    d = dict(profile)
+    # predictor.py expects revol_util as a string like "45%" (mirrors app.py line 102)
+    if not str(d['revol_util']).endswith('%'):
+        d['revol_util'] = f"{d['revol_util']}%"
+    # Explicit type casts that app.py applies before calling predictor.predict()
+    for k in ('loan_amnt', 'int_rate', 'annual_inc', 'dti', 'revol_bal', 'total_bc_limit',
+              'total_bal_ex_mort', 'avg_cur_bal', 'mo_sin_old_il_acct', 'mo_sin_old_rev_tl_op',
+              'mo_sin_rcnt_rev_tl_op', 'mths_since_recent_bc', 'mths_since_recent_inq',
+              'pct_tl_nvr_dlq', 'last_fico_range_low', 'last_fico_range_high',
+              'years_since_earliest_cr'):
+        d[k] = float(d[k])
+    for k in ('delinq_2yrs', 'inq_last_6mths', 'open_acc', 'total_acc'):
+        d[k] = int(d[k])
+    return d
+
+# --- STATE ---
 class AgentState(TypedDict):
     messages: Annotated[List[Any], add_messages]
-    current_profile: List[Any]
+    current_profile: Dict[str, Any]
 
 # --- TOOLS ---
 
 @tool
-def predict_credit_risk(updates: dict[str, Any] = {}, profile_list: list[Any] = None) -> str:
+def predict_credit_risk(
+    updates: Dict[str, Any],
+    profile: Annotated[Dict[str, Any], InjectedToolArg],
+) -> str:
     """
-    Predicts credit risk based on the current loan profile, optionally updating specific features.
-    
+    Predict loan approval based on the current profile, with optional feature updates.
+
+    Call this to answer questions like:
+    - "What is my current risk?" → pass updates={}
+    - "If my income is $90k and DTI is 10?" → pass updates={"annual_inc": 90000, "dti": 10}
+
     Args:
-        updates: A dictionary of feature names and their new values (e.g., {"annual_inc": 80000, "dti": 15}).
-                Available features: loan_amnt, int_rate, annual_inc, dti, revol_util, grade, etc.
-        profile_list: (Injected by state, do not set manually) The current full profile list.
-    
-    Returns:
-        JSON string containing the decision (APPROVE/REJECT), default probability, and risk level.
+        updates: Features to change before predicting. Use exact names and valid values:
+            Categorical — must use these exact strings:
+            - grade: "A", "B", "C", "D", "E", "F", "G"  (A=best, G=worst)
+            - home_ownership: "RENT", "MORTGAGE", "OWN", "OTHER"
+            - purpose: "debt_consolidation", "credit_card", "home_improvement",
+                       "major_purchase", "medical", "car", "wedding"
+            - verification_status: "Verified", "Source Verified", "Not Verified"
+            - addr_state: 2-letter US state code e.g. "CA", "NY", "TX"
+            - emp_length: "< 1 year", "1 year", "2 years", ..., "10+ years"
+            Numeric — pass as numbers (not strings):
+            - loan_amnt, int_rate, annual_inc, dti, revol_util, delinq_2yrs,
+              inq_last_6mths, open_acc, total_acc, revol_bal, total_bc_limit,
+              total_bal_ex_mort, avg_cur_bal, last_fico_range_low, last_fico_range_high,
+              years_since_earliest_cr, pct_tl_nvr_dlq
     """
-    # This function effectively acts as both "update profile" and "predict"
-    # In a real agent, we might separate them, but bundling is efficient here.
-    
-    # We need access to the current state. 
-    # NOTE: LangChain tools don't inherently see the graph state unless passed explicitly or via global/closure.
-    # For simplicity in this demo, we'll assume the agent passes the current profile 
-    # OR we use a global variable (less clean) OR we use the 'updates' to modify a base.
-    
-    # Let's use the `profile_list` argument which we will inject from the agent node.
-    # If not provided, use default (fallback).
-    current_list = profile_list.copy() if profile_list else DEFAULT_PROFILE.copy()
-    
-    # Apply updates
-    updated_features = []
-    for feature, value in updates.items():
-        if feature in FEATURE_MAP:
-            idx = FEATURE_MAP[feature]
-            current_list[idx] = value
-            updated_features.append(f"{feature}={value}")
-    
-    # Call API
+    working = dict(profile)
+    applied = []
+    unknown = []
+    for k, v in updates.items():
+        if k in working:
+            working[k] = v
+            applied.append(f"{k}={v}")
+        else:
+            unknown.append(k)
+
     try:
-        client = Client("http://localhost:7860")
-        result = client.predict(*current_list, api_name="/predict_loan")
-        
-        # Result format from app: [decision_html, results_md, color, fig]
-        decision_html = result[0]
-        results_md = result[1]
-        
-        decision = "APPROVE" if "LOAN APPROVED" in decision_html else "REJECT"
-        
-        # Extract probability (rough extraction from markdown)
-        prob = "Unknown"
-        threshold = "Unknown"
-        for line in results_md.split('\n'):
-            if "Default Probability" in line:
-                prob = line.split('|')[2].strip()
-            if "Optimal Threshold" in line:
-                threshold = line.split('|')[2].strip()
-                
-        return json.dumps({
-            "decision": decision,
-            "probability": prob,
-            "threshold": threshold,
-            "updates_applied": updated_features
-        })
-        
+        result = _predictor.predict(_profile_to_predictor_input(working))
+        if not result['success']:
+            return json.dumps({"error": result.get('error', 'Prediction failed')})
+
+        output = {
+            "decision": result['decision'],
+            "default_probability": f"{result['default_probability']:.2%}",
+            "risk_level": result['risk_level'],
+            "threshold": f"{result['optimal_threshold']:.2%}",
+            "updates_applied": applied,
+        }
+        if unknown:
+            output["unknown_features_ignored"] = unknown
+        return json.dumps(output)
+
     except Exception as e:
-        return f"Error calling prediction API: {str(e)}"
+        return json.dumps({"error": f"Prediction failed: {e}"})
+
+
+@tool
+def get_current_profile(
+    profile: Annotated[Dict[str, Any], InjectedToolArg],
+) -> str:
+    """
+    Return all current profile values that will be used for the next prediction.
+    Call this when the user asks about their current settings, values, or profile.
+    """
+    return json.dumps(profile, indent=2)
+
+
+@tool
+def reset_profile(
+    profile: Annotated[Dict[str, Any], InjectedToolArg],
+) -> str:
+    """
+    Reset all profile values back to the original defaults.
+    Call this when the user asks to reset, start over, or go back to baseline.
+    """
+    # Actual state reset is handled in tool_node; this returns the confirmation payload.
+    return json.dumps({"status": "reset", "new_profile": FEATURE_DEFAULTS})
+
+
+# --- LLM (module-level, instantiated once) ---
+# Uses OpenRouter — base URL and model prefix required
+_llm = ChatOpenAI(
+    model="openai/gpt-4o-mini",
+    temperature=0,
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+_tools = [predict_credit_risk, get_current_profile, reset_profile]
+_llm_with_tools = _llm.bind_tools(_tools)
+
+
+def _make_system_prompt(profile: Dict[str, Any]) -> str:
+    key_fields = ["loan_amnt", "int_rate", "grade", "annual_inc", "dti",
+                  "last_fico_range_low", "home_ownership", "purpose"]
+    summary = {k: profile[k] for k in key_fields}
+    return f"""You are a helpful Financial Credit Risk Assistant with access to a What-If simulation tool.
+
+Current profile summary:
+{json.dumps(summary, indent=2)}
+
+Available tools:
+- predict_credit_risk: Run a prediction, optionally changing features first
+- get_current_profile: Show the user all current profile values
+- reset_profile: Revert all values to the original defaults
+
+Always summarize results clearly. When comparing scenarios, highlight the change in probability.
+Use exact feature names and valid categorical values as documented in predict_credit_risk.
+Important: the model was trained on Lending Club data (2013-2014) with loan amounts up to $40,000. If the user requests inputs far outside this range (e.g. loan_amnt > $40k, income implausibly low for the loan size), warn them that the prediction is unreliable."""
+
 
 # --- AGENT NODES ---
 
-def chatbot(state: AgentState):
-    """
-    The main chatbot node that invokes the LLM.
-    """
-    messages = state['messages']
-    profile = state.get('current_profile', DEFAULT_PROFILE)
-    
-    # We must inject the current profile into the tool call if the LLM decides to call it.
-    # However, standard OpenAI function calling doesn't let us easily inject hidden args *after* generation.
-    # STRATEGY: The LLM generates the 'updates' dict. The 'tool_node' will handle the merging.
-    
-    llm = ChatOpenAI(model="openai/gpt-3.5-turbo", temperature=0)
-    llm_with_tools = llm.bind_tools([predict_credit_risk])
-    
-    response = llm_with_tools.invoke(messages)
+def chatbot(state: AgentState) -> dict:
+    profile = state.get("current_profile", dict(FEATURE_DEFAULTS))
+    non_system = [m for m in state["messages"] if not isinstance(m, SystemMessage)]
+    messages = [SystemMessage(content=_make_system_prompt(profile))] + non_system
+    response = _llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
-def tool_node(state: AgentState):
-    """
-    Executes tools requested by the LLM.
-    Handles state updates (modifying the profile).
-    """
-    messages = state['messages']
-    last_message = messages[-1]
-    profile = state.get('current_profile', list(DEFAULT_PROFILE)) # Copy!
-    
-    outputs = []
-    
-    for tool_call in last_message.tool_calls:
-        if tool_call["name"] == "predict_credit_risk":
-            # Extract arguments provided by LLM
-            updates = tool_call["args"].get("updates", {})
-            
-            # Update the ACTUAL state profile
-            for feature, value in updates.items():
-                if feature in FEATURE_MAP:
-                    idx = FEATURE_MAP[feature]
-                    profile[idx] = value
-            
-            # Execute the tool fn
-            # We explicitly pass the *updated* profile to the tool so it predicts on the new state
-            result = predict_credit_risk.invoke({"updates": updates, "profile_list": profile})
-            
-            outputs.append(
-                ToolMessage(
-                    content=str(result),
-                    tool_call_id=tool_call["id"],
-                    name=tool_call["name"]
-                )
-            )
-            
-    # Return the tool outputs AND the updated profile to the state
-    return {
-        "messages": outputs, 
-        "current_profile": profile  # Persist the changes!
-    }
 
-# --- GRAPH DEFINITION ---
+def tool_node(state: AgentState) -> dict:
+    last_message = state["messages"][-1]
+    profile = dict(state.get("current_profile", FEATURE_DEFAULTS))
+    outputs = []
+
+    for tc in last_message.tool_calls:
+        name = tc["name"]
+
+        if name == "predict_credit_risk":
+            raw = tc["args"]
+            # LLMs sometimes pass features directly as top-level args instead of nested
+            # inside the 'updates' dict — handle both calling patterns.
+            if raw.get("updates"):
+                updates = raw["updates"]
+            else:
+                updates = {k: v for k, v in raw.items() if k in profile}
+            # Apply updates to the persisted profile
+            for k, v in updates.items():
+                if k in profile:
+                    profile[k] = v
+            result = predict_credit_risk.invoke({"updates": updates, "profile": profile})
+
+        elif name == "get_current_profile":
+            result = get_current_profile.invoke({"profile": profile})
+
+        elif name == "reset_profile":
+            profile = dict(FEATURE_DEFAULTS)
+            result = reset_profile.invoke({"profile": profile})
+
+        else:
+            result = json.dumps({"error": f"Unknown tool: {name}"})
+
+        outputs.append(ToolMessage(content=str(result), tool_call_id=tc["id"], name=name))
+
+    return {"messages": outputs, "current_profile": profile}
+
+
+# --- GRAPH ---
 def build_graph():
     workflow = StateGraph(AgentState)
-    
     workflow.add_node("agent", chatbot)
     workflow.add_node("tools", tool_node)
-    
     workflow.set_entry_point("agent")
-    
+
     def should_continue(state: AgentState):
-        last_message = state['messages'][-1]
-        if last_message.tool_calls:
-            return "tools"
-        return END
-    
+        return "tools" if state["messages"][-1].tool_calls else END
+
     workflow.add_conditional_edges("agent", should_continue)
     workflow.add_edge("tools", "agent")
-    
     return workflow.compile()
+
 
 # --- MAIN LOOP ---
 def run_interactive_session():
     graph = build_graph()
-    
-    # Initialize state with a system message and default profile
-    initial_state = {
-        "messages": [
-            SystemMessage(content="""You are a helpful Financial Credit Risk Assistant. 
-            You have access to a 'What-If' simulation tool that can predict loan approval probability.
-            
-            Users will ask you questions like:
-            - "What is my current risk?"
-            - "If I increase my income to 90k, will I be approved?"
-            - "What if I lower my DTI to 10?"
-            
-            Identify which features the user wants to change, call the `predict_credit_risk` tool with those updates.
-            Always summarize the result clearly to the user, highlighting the change in probability if applicable.
-            """)
-        ],
-        "current_profile": list(DEFAULT_PROFILE)
+
+    state: AgentState = {
+        "messages": [],
+        "current_profile": dict(FEATURE_DEFAULTS),
     }
-    
-    print("🤖 Financial Sandbox Agent Ready! (Type 'quit' to exit)")
-    print("-----------------------------------------------------")
-    print(f"Current Profile Baseline: Income=$75k, Loan=$15k, DTI=18.5, Grade=C")
-    
-    # We maintain the conversation history in `current_state`
-    current_state = initial_state
-    
+
+    print("Financial Sandbox Agent Ready! (Type 'quit' to exit)")
+    print("------------------------------------------------------")
+    print("Baseline: Income=$75k, Loan=$15k, DTI=18.5, Grade=C, FICO=680-684")
+
     while True:
-        try:
-            user_input = input("\nUser: ")
-            if user_input.lower() in ["quit", "exit", "q"]:
-                break
-            
-            # Append user message to history
-            current_state["messages"].append(HumanMessage(content=user_input))
-            
-            print("Thinking...", end="", flush=True)
-            
-            # Run the graph until it produces a final response
-            for event in graph.stream(current_state):
-                for key, value in event.items():
-                    if key == "tools":
-                        print(" [Running Simulation] ", end="", flush=True)
-                    elif key == "agent":
-                        print(".", end="", flush=True)
-                    
-                    if "messages" in value:
-                        current_state["messages"] = add_messages(current_state["messages"], value["messages"])
-                    if "current_profile" in value:
-                        current_state["current_profile"] = value["current_profile"]
-            
-            print("\n")
-            
-            last_msg = current_state['messages'][-1]
-            print(f"Agent: {last_msg.content}")
-            
-        except Exception as e:
-            print(f"\n❌ Error: {e}")
+        user_input = input("\nUser: ").strip()
+        if user_input.lower() in ("quit", "exit", "q"):
             break
+        if not user_input:
+            continue
+
+        state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
+
+        print("Thinking...", end="", flush=True)
+
+        try:
+            final = graph.invoke(state)
+            state["messages"] = final["messages"]
+            state["current_profile"] = final["current_profile"]
+
+            for msg in reversed(state["messages"]):
+                if isinstance(msg, AIMessage) and msg.content:
+                    print(f"\n\nAgent: {msg.content}")
+                    break
+
+        except Exception as e:
+            print(f"\nError: {e}")
+            # Continue — don't kill the session on transient errors
+
 
 if __name__ == "__main__":
     run_interactive_session()

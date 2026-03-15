@@ -1,0 +1,14 @@
+# Claude Code local settings (may contain API keys in allowed commands)
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment / secrets
+.env
+.env.*
+
+# OS
+.DS_Store

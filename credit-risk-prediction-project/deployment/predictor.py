@@ -14,7 +14,7 @@ class CreditRiskPredictor:
         self.model = None
         self.scaler = None
         self.imputer = None
-        self.optimal_threshold = 0.28
+        self.optimal_threshold = 0.85  # from training profit analysis (was incorrectly 0.28)
         
         # Load the ACTUAL feature list from your JSON
         self.feature_list = self._load_actual_features()
