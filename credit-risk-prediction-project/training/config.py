@@ -107,7 +107,7 @@ CONFIG = {
         
         # Paper's basic features from methodology
         'paper_basic': [
-            'loan_amnt', 'int_rate', 'grade_numeric', 'emp_length_numeric',
+            'loan_amnt', 'int_rate', 'emp_length_numeric',
             'annual_inc', 'dti', 'revol_util_decimal', 'delinq_2yrs',
             'inq_last_6mths', 'open_acc', 'total_acc'
         ],
@@ -244,7 +244,6 @@ CONFIG = {
         
         # Interaction terms (our improvement)
         'interaction_terms': [
-            ('grade_numeric', 'dti'),
             ('loan_amnt', 'annual_inc'),
             ('int_rate', 'loan_amnt'),
             ('emp_length_numeric', 'annual_inc')

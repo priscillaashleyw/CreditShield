@@ -14,48 +14,64 @@ class DataLoader:
     
     def __init__(self, config):
         self.config = config
-        raw = config['paths']['raw_data']
-        # If raw is a Kaggle URI, store it + set local cache path
+
+        # project root = credit-risk-prediction-project/training/src/.. /..
+        self.project_root = Path(__file__).resolve().parents[2]
+        self.training_dir = self.project_root / "training"
+
+        raw = config["paths"]["raw_data"]
+
         if isinstance(raw, str) and raw.startswith("kaggle://"):
-            self.kaggle_uri = raw 
+            self.kaggle_uri = raw
             filename = raw.split("/")[-1]
-            self.data_path = Path("data") / filename
+            self.data_path = self.training_dir / "data" / filename
         else:
             self.kaggle_uri = None
-            self.data_path = Path(raw)
+            raw_path = Path(raw)
+            if raw_path.is_absolute():
+                self.data_path = raw_path
+            else:
+                self.data_path = self.project_root / raw_path
     
     def _ensure_raw_data(self):
-        # Case 1: exact file already exists
-        if self.data_path.exists() and self.data_path.is_file():
-            return
+        import shutil
+        import subprocess
 
-        # Case 2: path exists but is a directory -> find CSV inside
-        if self.data_path.exists() and self.data_path.is_dir():
-            csvs = list(self.data_path.glob("*.csv"))
-            if not csvs:
-                csvs = list(self.data_path.rglob("*.csv"))
-            if not csvs:
-                raise FileNotFoundError(f"No CSV found inside directory: {self.data_path}")
-            csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
-            self.data_path = csvs[0]
-            print(f"✓ Resolved data file inside directory: {self.data_path}")
-            return
+        # Case 1: path already exists
+        if self.data_path.exists():
+            if self.data_path.is_file():
+                return
 
+            # If it exists but is a directory, try to resolve the real CSV inside it
+            if self.data_path.is_dir():
+                csvs = list(self.data_path.glob("*.csv")) + list(self.data_path.rglob("*.csv"))
+                if csvs:
+                    csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+                    self.data_path = csvs[0]
+                    print(f"Resolved directory to CSV: {self.data_path}")
+                    return
+
+                raise IsADirectoryError(
+                    f"Expected a CSV file, but found a directory with no CSV inside: {self.data_path}"
+                )
+
+        # Case 2: file missing and no Kaggle source
         if not self.kaggle_uri:
             raise FileNotFoundError(f"Data file not found: {self.data_path}")
 
-        # Parse kaggle://<owner>/<dataset>/<file>
+        # Parse kaggle:///owner/dataset/file
         parts = self.kaggle_uri.replace("kaggle://", "").split("/")
         if len(parts) < 3:
             raise ValueError(f"Invalid Kaggle URI: {self.kaggle_uri}")
 
         dataset = "/".join(parts[:2])
         filename = "/".join(parts[2:])
+        dataset = "/".join(parts[:2])
+        filename = "/".join(parts[2:])
         dest_dir = self.data_path.parent
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"Downloading from Kaggle: {dataset} (file={filename}) ...")
-        import shutil
 
         kaggle_exe = shutil.which("kaggle")
         if not kaggle_exe:
@@ -67,41 +83,30 @@ class DataLoader:
             [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
             check=True
         )
+        )
 
-        # First try exact file
-        if self.data_path.exists() and self.data_path.is_file():
-            return
+        # After download, resolve the actual CSV
+        if self.data_path.exists():
+            if self.data_path.is_file():
+                return
+            if self.data_path.is_dir():
+                csvs = list(self.data_path.glob("*.csv")) + list(self.data_path.rglob("*.csv"))
+                if csvs:
+                    csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+                    self.data_path = csvs[0]
+                    print(f"Resolved downloaded directory to CSV: {self.data_path}")
+                    return
 
-        # If exact path is now a directory, resolve file inside it
-        if self.data_path.exists() and self.data_path.is_dir():
-            csvs = list(self.data_path.glob("*.csv"))
-            if not csvs:
-                csvs = list(self.data_path.rglob("*.csv"))
-            if not csvs:
-                raise FileNotFoundError(f"No CSV found inside downloaded directory: {self.data_path}")
-            csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
-            self.data_path = csvs[0]
-            print(f"✓ Resolved downloaded CSV: {self.data_path}")
-            return
-
-        # Fallback: search anywhere in destination
         csvs = list(dest_dir.glob("*.csv"))
         if not csvs:
             csvs = list(dest_dir.rglob("*.csv"))
         if not csvs:
             raise FileNotFoundError(f"No CSV found after Kaggle download into {dest_dir}")
 
-        # Prefer the requested filename if possible
-        filename_only = Path(filename).name.lower()
-        matching = [p for p in csvs if p.name.lower() == filename_only]
-        if matching:
-            self.data_path = matching[0]
-        else:
-            csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
-            self.data_path = csvs[0]
-
-        print(f"✓ Using discovered CSV: {self.data_path}")
-            
+        csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+        self.data_path = csvs[0]
+        print(f"Using downloaded CSV: {self.data_path}")
+        
     def load_and_filter_data(self):
         """
         Load and filter data according to paper specifications

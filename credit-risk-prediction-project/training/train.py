@@ -37,6 +37,7 @@ from config import CONFIG
 from src.load_data import DataLoader
 from src.build_features import FeatureEngineer
 from src.train_models import ModelTrainer
+from src.stability_analysis import run_stability_analysis
 
 print("=" * 80)
 print("CREDIT RISK PREDICTION - PAPER REPLICATION + IMPROVEMENTS")
@@ -318,8 +319,43 @@ def main():
     else:
         print("⚠️  Cannot perform business analysis")
     
-    # 7. SAVE RESULTS
-    print("\n\n7. SAVING RESULTS")
+    # 7. STABILITY ANALYSIS
+    print("\n\n7. STABILITY ANALYSIS")
+    print("-" * 40)
+
+    stability_results = {}
+
+    if best_xgb is not None and enhanced_features:
+        try:
+            X_test_scaled = scaler.transform(imputer.transform(test_df[enhanced_features]))
+            y_test = test_df['target'].values
+
+            y_pred_proba = best_xgb.predict_proba(X_test_scaled)[:, 1]
+            y_pred = (y_pred_proba >= best_threshold).astype(int)
+
+            eval_df = test_df.copy()
+            eval_df["y_true"] = y_test
+            eval_df["y_pred"] = y_pred
+            eval_df["y_pred_proba"] = y_pred_proba
+
+            stability_results = run_stability_analysis(
+                eval_df,
+                issue_date_col="issue_date",   # use your actual column name
+                grade_col="grade",
+                income_col="annual_inc",
+                loan_col="loan_amnt",
+            )
+
+            for name, df_seg in stability_results.items():
+                print(f"✓ Stability analysis completed: {name} ({len(df_seg)} rows)")
+
+        except Exception as e:
+            print(f"⚠️  Stability analysis failed: {str(e)[:80]}...")
+    else:
+        print("⚠️  Cannot perform stability analysis")
+    
+    # 8. SAVE RESULTS
+    print("\n\n8. SAVING RESULTS")
     print("-" * 40)
     
     try:
@@ -346,6 +382,10 @@ def main():
                 'our_enhanced_avg_auc': float(all_results_df[all_results_df['feature_set'] == 'our_enhanced']['auc_roc'].mean() if 'our_enhanced' in all_results_df['feature_set'].unique() else 0)
             }
         }
+
+        for name, df_seg in stability_results.items():
+            df_seg.to_csv(f"results/{name}_{timestamp}.csv", index=False)
+            print(f"✓ {name}: results/{name}_{timestamp}.csv")
         
         with open(f'results/summary_{timestamp}.json', 'w') as f:
             json.dump(summary, f, indent=2)
@@ -355,9 +395,9 @@ def main():
     except Exception as e:
         print(f"⚠️  Error saving results: {e}")
     
-    # 8. CREATE VISUALIZATIONS (optional)
+    # 9. CREATE VISUALIZATIONS (optional)
     if not args.no_viz:
-        print("\n\n8. CREATING VISUALIZATIONS")
+        print("\n\n9. CREATING VISUALIZATIONS")
         print("-" * 40)
         
         try:
@@ -365,7 +405,7 @@ def main():
         except Exception as e:
             print(f"⚠️  Visualization error: {e}")
     
-    # 9. FINAL SUMMARY
+    # 10. FINAL SUMMARY
     print("\n\n" + "=" * 80)
     print("TRAINING COMPLETE! 🎉")
     print("=" * 80)

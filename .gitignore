@@ -3,9 +3,12 @@ __pycache__/
 
 .ipynb_checkpoints/
 
-*.csv
+training/data/
+credit-risk-prediction-project/training/data/
+
 *.gzip
 *.zip
+*.csv.gz
 
 .vscode/
 
