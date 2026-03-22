@@ -341,38 +341,66 @@ class ModelTrainer:
         # Return indices of top k features
         return indices
     
-    def business_profit_analysis(self, model, X_test, y_test, thresholds=None):
+    def business_profit_analysis(self, model, X_test, y_test, loan_data=None, thresholds=None):
         """
-        Analyze business profit for different thresholds
-        (Improvement over paper's accuracy-only evaluation)
+        Analyze business profit for different thresholds using per-loan calculations.
+
+        Profit logic:
+          TP (correctly rejected bad loan)  = + loan_amnt * loss_given_default  (principal saved)
+          FN (missed bad loan, approved it) = - loan_amnt * loss_given_default  (principal lost)
+          FP (wrongly rejected good loan)   = - loan_amnt * int_rate * term     (interest lost)
+          TN (correctly approved good loan) = + loan_amnt * int_rate * term     (interest earned)
         """
         if thresholds is None:
             thresholds = np.arange(0.1, 0.9, 0.05)
-        
+
         y_pred_proba = model.predict_proba(X_test)[:, 1]
-        
+        y_test = np.array(y_test)
+
         business_config = self.config['business']
+        lgd = business_config['loss_given_default']
+        default_term = business_config['default_term_years']
+
+        # Build per-loan value arrays
+        if loan_data is not None and 'loan_amnt' in loan_data.columns and 'int_rate' in loan_data.columns:
+            loan_amnt = np.array(loan_data['loan_amnt'].fillna(loan_data['loan_amnt'].median()))
+            int_rate = np.array(loan_data['int_rate'].fillna(loan_data['int_rate'].median()))
+            # int_rate is stored as percentage (e.g. 13.5), convert to decimal
+            int_rate = int_rate / 100.0
+            term_years = np.full(len(loan_amnt), default_term)
+            if 'term' in loan_data.columns:
+                term_years = np.array(loan_data['term'].fillna(36)) / 12.0
+        else:
+            # Fallback to dataset averages if loan data not provided
+            loan_amnt = np.full(len(y_test), 14000.0)
+            int_rate  = np.full(len(y_test), 0.135)
+            term_years = np.full(len(y_test), default_term)
+
+        # Per-loan profit values
+        principal_value  = loan_amnt * lgd                   # what we save/lose on a default
+        interest_value   = loan_amnt * int_rate * term_years # what we earn/lose on a good loan
+
         profits = []
         metrics_list = []
-        
+
         for thresh in thresholds:
             y_pred = (y_pred_proba >= thresh).astype(int)
-            
-            # Calculate confusion matrix
-            tp = ((y_pred == 1) & (y_test == 1)).sum()
-            tn = ((y_pred == 0) & (y_test == 0)).sum()
-            fp = ((y_pred == 1) & (y_test == 0)).sum()
-            fn = ((y_pred == 0) & (y_test == 1)).sum()
-            
-            # Calculate profit (business improvement)
+
+            tp_mask = (y_pred == 1) & (y_test == 1)  # correctly rejected bad loan
+            fn_mask = (y_pred == 0) & (y_test == 1)  # missed bad loan (approved it)
+            fp_mask = (y_pred == 1) & (y_test == 0)  # wrongly rejected good loan
+            tn_mask = (y_pred == 0) & (y_test == 0)  # correctly approved good loan
+
             profit = (
-                tp * business_config['profit_tp'] +
-                tn * business_config['profit_tn'] +
-                fp * business_config['loss_fp'] +
-                fn * business_config['loss_fn']
+                  principal_value[tp_mask].sum()   # saved principal on true bad loans
+                - principal_value[fn_mask].sum()   # lost principal on missed bad loans
+                - interest_value[fp_mask].sum()    # lost interest on wrongly rejected good loans
+                + interest_value[tn_mask].sum()    # earned interest on approved good loans
             )
-            
-            # Calculate traditional metrics
+
+            tp = tp_mask.sum(); tn = tn_mask.sum()
+            fp = fp_mask.sum(); fn = fn_mask.sum()
+
             metrics = {
                 'threshold': thresh,
                 'profit': profit,
@@ -382,15 +410,15 @@ class ModelTrainer:
                 'f1_score': 2 * tp / max(2 * tp + fp + fn, 1),
                 'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn
             }
-            
+
             profits.append(profit)
             metrics_list.append(metrics)
-        
+
         # Find optimal threshold
         best_idx = np.argmax(profits)
         best_threshold = thresholds[best_idx]
         best_metrics = metrics_list[best_idx]
-        
+
         return best_threshold, best_metrics, pd.DataFrame(metrics_list)
     
     def _calculate_metrics(self, y_true, y_pred, y_pred_proba):

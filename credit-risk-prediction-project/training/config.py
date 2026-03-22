@@ -7,7 +7,7 @@ Paper: "Credit scoring for peer-to-peer lending using machine learning technique
 CONFIG = {
     # Paths and directories
     'paths': {
-        'raw_data': 'data/accepted_2007_to_2018Q4.csv',
+        'raw_data': 'kaggle://wordsforthewise/lending-club/accepted_2007_to_2018Q4.csv',
         'models_dir': 'models',
         'results_dir': 'results',
         'logs_dir': 'logs',
@@ -107,7 +107,7 @@ CONFIG = {
         
         # Paper's basic features from methodology
         'paper_basic': [
-            'loan_amnt', 'int_rate', 'grade_numeric', 'emp_length_numeric',
+            'loan_amnt', 'int_rate', 'emp_length_numeric',
             'annual_inc', 'dti', 'revol_util_decimal', 'delinq_2yrs',
             'inq_last_6mths', 'open_acc', 'total_acc'
         ],
@@ -211,12 +211,14 @@ CONFIG = {
     
     # Business settings for profit analysis (improvement over accuracy-only)
     'business': {
-        # Profit/loss values (example - should be calibrated to your business)
-        'profit_tp': 3000,    # Profit from true positive (correctly approved good loan)
-        'profit_tn': 1000,    # Profit from true negative (avoided bad loan)
-        'loss_fp': -15000,    # Loss from false positive (approved bad loan)
-        'loss_fn': -5000,     # Loss from false negative (rejected good loan)
-        
+        # Per-loan profit/loss parameters
+        # TP: correctly rejected bad loan  → saved principal (loss_given_default % of loan_amnt)
+        # FN: missed bad loan, approved it → lost principal (loss_given_default % of loan_amnt)
+        # FP: wrongly rejected good loan   → lost interest income (loan_amnt * int_rate * term)
+        # TN: correctly approved good loan → earned interest income (loan_amnt * int_rate * term)
+        'loss_given_default': 0.90,   # % of principal lost when a loan defaults (90% is typical)
+        'default_term_years': 3.0,    # assumed loan term in years if not in data (LC default is 36 months)
+
         # Threshold search range
         'threshold_min': 0.1,
         'threshold_max': 0.9,
@@ -244,7 +246,6 @@ CONFIG = {
         
         # Interaction terms (our improvement)
         'interaction_terms': [
-            ('grade_numeric', 'dti'),
             ('loan_amnt', 'annual_inc'),
             ('int_rate', 'loan_amnt'),
             ('emp_length_numeric', 'annual_inc')

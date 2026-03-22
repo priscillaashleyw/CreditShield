@@ -7,7 +7,6 @@ import re
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 import warnings
-from textblob import TextBlob
 warnings.filterwarnings('ignore')
 
 class FeatureEngineer:
@@ -30,21 +29,15 @@ class FeatureEngineer:
         # 1. Convert employment length (ordinal encoding as per paper)
         df['emp_length_numeric'] = df['emp_length'].apply(self._emp_to_numeric)
         
-        # 2. Convert grade to numeric (A=1, B=2, ..., G=7)
-        grade_map = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7}
-        df['grade_numeric'] = df['grade'].map(grade_map)
-        
-        # 3. Convert revol_util from percentage to decimal
+        # 2. Convert revol_util from percentage to decimal
         df['revol_util_decimal'] = df['revol_util'].astype(str).str.replace('%', '').astype(float) / 100
         
-        # 4. Convert earliest credit line to years from issue date
-        # reference paper used reference date of September 2018, but we will calculate based on issue date 
-        # since we want to preserve semantic meaning of "years since earliest credit line" at the time of loan issuance
+        # 3. Convert earliest credit line to years from reference date (as per paper)
+        reference_date = pd.Timestamp('2018-09-01')  # September 2018 as per paper
         df['earliest_cr_line_date'] = pd.to_datetime(df['earliest_cr_line'], format='%b-%Y', errors='coerce')
-        df['issue_date'] = pd.to_datetime(df['issue_d'], errors='coerce')
-        df['years_since_earliest_cr'] = ((df['issue_date'] - df['earliest_cr_line_date']).dt.days / 365.25)
+        df['years_since_earliest_cr'] = (reference_date - df['earliest_cr_line_date']).dt.days / 365.25
         
-        # 5. Create missing value indicators as per paper
+        # 4. Create missing value indicators as per paper
         # For features like 'mths_since_last_delinq' where NA means no delinquency
         if 'mths_since_last_delinq' in df.columns:
             df['has_delinq_history'] = df['mths_since_last_delinq'].notna().astype(int)
@@ -54,56 +47,25 @@ class FeatureEngineer:
             df['has_public_record'] = df['mths_since_last_record'].notna().astype(int)
             df['mths_since_last_record_filled'] = df['mths_since_last_record'].fillna(-1)
         
-        # 6. One-hot encoding for categorical features without ordinal relationship
+        # 5. One-hot encoding for categorical features without ordinal relationship
         categorical_cols = ['home_ownership', 'verification_status', 'purpose', 'addr_state']
         for col in categorical_cols:
             if col in df.columns:
                 dummies = pd.get_dummies(df[col], prefix=col, drop_first=True)
                 df = pd.concat([df, dummies], axis=1)
         
-        # 7. Create interaction terms (our improvement)
+        # 6. Create interaction terms (our improvement)
         df['loan_to_income'] = df['loan_amnt'] / (df['annual_inc'] + 1)
         df['int_rate_times_loan'] = df['int_rate'] * df['loan_amnt'] / 1000
-
-        # This feature captures how much of the borrower's monthly income would go towards the loan installment, which is a critical factor in credit risk assessment. 
-        # A higher value indicates a higher burden on the borrower, which could correlate with higher default risk.
-        df['installment_to_income'] = 12 * df['installment'] / (df['annual_inc'] + 1) # add 1 to prevent division by zero
-
-        # This feature captures the combined effect of the borrower's existing debt burden (DTI) and the new loan's monthly payment. 
-        # It provides insight into how much of the borrower's monthly income would be consumed by all debt obligations, including the new loan. 
-        # A higher value indicates a higher overall debt burden, which could correlate with higher default risk.
-        df['dti_with_new_loan'] = ((df['dti'] * df['annual_inc']/12) + df['monthly_payment']) / (df['annual_inc']/12) * 100
-
         
-        # 8. Create text-based features from loan title (NLP improvement)
-        # title has 63154 columns - not categorical
+        # 7. Create text-based features from loan title (NLP improvement)
         if 'title' in df.columns:
-            # length features
             df['title_length'] = df['title'].astype(str).str.len()
             df['title_word_count'] = df['title'].astype(str).str.split().str.len()
-
             # Simple keyword extraction
-            # keywords = ['debt', 'consolidation', 'credit', 'card', 'medical', 'home', 'car']
-            risk_keywords = [
-                'medical','hospital','surgery',
-                'bill','expenses','emergency',
-                'consolidat','payoff','collection',
-                'business','startup',
-                'tuition','school',
-                'moving','relocat'
-            ]
-
-            # Create binary features for presence of risk keywords in title
-            for keyword in risk_keywords:
-                df[f'title_has_{keyword}'] = df['title'].astype(str).str.contains(keyword, case=False, na=False).astype(int)
-
-            # Create a feature that captures if the title contains risk keywords but the purpose is "other" (potentially indicating hidden risk)
-            df['title_keyword_other'] = ((df['purpose'] == 'other') & df['title'].astype(str).str.contains(
-                '|'.join(risk_keywords), case=False, na=False)).astype(int)
-
-        # perform simple sentiment analysis using TextBlob to extract polarity and subjectivity as features
-        df['title_polarity'] = df['title'].apply(lambda x: TextBlob(x).sentiment.polarity)
-        df['title_subjectivity'] = df['title'].apply(lambda x: TextBlob(x).sentiment.subjectivity)
+            keywords = ['debt', 'consolidation', 'credit', 'card', 'medical', 'home', 'car']
+            for keyword in keywords:
+                df[f'title_has_{keyword}'] = df['title'].astype(str).str.contains(keyword, case=False).astype(int)
         
         print(f"✓ Created {len([c for c in df.columns if 'target' not in c])} features total")
         return df
@@ -115,7 +77,7 @@ class FeatureEngineer:
         non_feature_columns = [
             'target', 'loan_status', 'issue_d', 'issue_date', 
             'issue_year', 'earliest_cr_line', 'earliest_cr_line_date',
-            'emp_length', 'grade', 'revol_util', 'title'
+            'emp_length', 'revol_util', 'title'
         ]
         
         # Get all available feature columns
@@ -141,7 +103,7 @@ class FeatureEngineer:
         # Add our engineered features that exist in the dataframe
         our_engineered_patterns = [
             'loan_to_income', 'int_rate_times_loan', 'subprime_high_dti',
-            'emp_length_numeric', 'grade_numeric', 'revol_util_decimal',
+            'emp_length_numeric', 'revol_util_decimal',
             'years_since_earliest_cr', 'has_delinq_history',
             'title_length', 'title_word_count', 'title_has_'
         ]
@@ -227,4 +189,3 @@ class FeatureEngineer:
         }).sort_values('importance', ascending=False)
         
         return feat_imp
-    
