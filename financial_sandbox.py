@@ -15,9 +15,9 @@ from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool, InjectedToolArg
 
 # --- CONFIGURATION ---
-if not os.environ.get("OPENAI_API_KEY"):
-    print("⚠️  OPENAI_API_KEY not set. Run: export OPENAI_API_KEY='sk-or-v1-...'")
-    sys.exit(1)
+_API_KEY_MISSING = not os.environ.get("OPENAI_API_KEY")
+if _API_KEY_MISSING:
+    print("WARNING: OPENAI_API_KEY not set. Chatbot will be disabled.")
 
 # --- FEATURE DEFINITIONS ---
 # Ordered dict matching the Gradio /predict_loan parameter order exactly.
@@ -166,14 +166,17 @@ def reset_profile(
 
 # --- LLM (module-level, instantiated once) ---
 # Uses OpenRouter — base URL and model prefix required
-_llm = ChatOpenAI(
-    model="openai/gpt-4o-mini",
-    temperature=0,
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ["OPENAI_API_KEY"],
-)
-_tools = [predict_credit_risk, get_current_profile, reset_profile]
-_llm_with_tools = _llm.bind_tools(_tools)
+_llm = None
+_llm_with_tools = None
+if not _API_KEY_MISSING:
+    _llm = ChatOpenAI(
+        model="openai/gpt-4o-mini",
+        temperature=0,
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENAI_API_KEY"],
+    )
+    _tools = [predict_credit_risk, get_current_profile, reset_profile]
+    _llm_with_tools = _llm.bind_tools(_tools)
 
 
 def _make_system_prompt(profile: Dict[str, Any]) -> str:
@@ -259,6 +262,9 @@ def build_graph():
 
 # --- MAIN LOOP ---
 def run_interactive_session():
+    if _API_KEY_MISSING:
+        print("Cannot start session: OPENAI_API_KEY not set.")
+        return
     graph = build_graph()
 
     state: AgentState = {
