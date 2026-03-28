@@ -68,6 +68,76 @@ class FeatureEngineer:
                 df[f'title_has_{keyword}'] = df['title'].astype(str).str.contains(keyword, case=False).astype(int)
         
         print(f"✓ Created {len([c for c in df.columns if 'target' not in c])} features total")
+
+        # 8. Simple borrower profile risk heuristic
+        # Higher score = higher risk
+
+        score = np.zeros(len(df), dtype=float)
+
+        # FICO (use midpoint if both columns exist)
+        if {'last_fico_range_low', 'last_fico_range_high'}.issubset(df.columns):
+            fico_mid = (df['last_fico_range_low'] + df['last_fico_range_high']) / 2
+
+            score += np.where(fico_mid < 580, 25, 0)
+            score += np.where((fico_mid >= 580) & (fico_mid < 640), 18, 0)
+            score += np.where((fico_mid >= 640) & (fico_mid < 700), 10, 0)
+            score += np.where((fico_mid >= 700) & (fico_mid < 750), 4, 0)
+            score += np.where(fico_mid >= 750, 0, 0)
+
+        # Debt-to-income
+        if 'dti' in df.columns:
+            score += np.where(df['dti'] > 30, 20, 0)
+            score += np.where((df['dti'] > 20) & (df['dti'] <= 30), 10, 0)
+            score += np.where((df['dti'] > 10) & (df['dti'] <= 20), 4, 0)
+
+        # Delinquencies
+        if 'delinq_2yrs' in df.columns:
+            score += np.where(df['delinq_2yrs'] >= 3, 15, 0)
+            score += np.where((df['delinq_2yrs'] >= 1) & (df['delinq_2yrs'] < 3), 8, 0)
+
+        # Recent hard inquiries
+        if 'inq_last_6mths' in df.columns:
+            score += np.where(df['inq_last_6mths'] >= 4, 10, 0)
+            score += np.where((df['inq_last_6mths'] >= 2) & (df['inq_last_6mths'] < 4), 5, 0)
+
+        # Revolving utilization
+        if 'revol_util_decimal' in df.columns:
+            score += np.where(df['revol_util_decimal'] > 0.9, 12, 0)
+            score += np.where((df['revol_util_decimal'] > 0.7) & (df['revol_util_decimal'] <= 0.9), 7, 0)
+            score += np.where((df['revol_util_decimal'] > 0.5) & (df['revol_util_decimal'] <= 0.7), 3, 0)
+
+        # Loan size relative to income
+        if 'loan_to_income' in df.columns:
+            score += np.where(df['loan_to_income'] > 0.5, 12, 0)
+            score += np.where((df['loan_to_income'] > 0.3) & (df['loan_to_income'] <= 0.5), 7, 0)
+            score += np.where((df['loan_to_income'] > 0.15) & (df['loan_to_income'] <= 0.3), 3, 0)
+
+        # Employment length
+        if 'emp_length_numeric' in df.columns:
+            score += np.where(df['emp_length_numeric'].fillna(0) < 1, 6, 0)
+            score += np.where(
+                (df['emp_length_numeric'].fillna(0) >= 1) &
+                (df['emp_length_numeric'].fillna(0) < 3), 3, 0
+            )
+
+        # Public record bankruptcies
+        if 'pub_rec_bankruptcies' in df.columns:
+            score += np.where(df['pub_rec_bankruptcies'] >= 1, 12, 0)
+
+        # Income verification
+        if 'verification_status' in df.columns:
+            score += np.where(df['verification_status'].astype(str).str.lower() == 'not verified', 5, 0)
+
+        # Cap and store
+        df['risk_heuristic_score'] = np.clip(score, 0, 100)
+
+        # Label buckets
+        df['risk_heuristic_label'] = pd.cut(
+            df['risk_heuristic_score'],
+            bins=[-1, 20, 40, 60, 100],
+            labels=['Low', 'Moderate', 'High', 'Very High']
+        )
+
         return df
     
     def create_feature_sets(self, df):
@@ -105,7 +175,8 @@ class FeatureEngineer:
             'loan_to_income', 'int_rate_times_loan', 'subprime_high_dti',
             'emp_length_numeric', 'revol_util_decimal',
             'years_since_earliest_cr', 'has_delinq_history',
-            'title_length', 'title_word_count', 'title_has_'
+            'title_length', 'title_word_count', 
+            'title_has_', 'risk_heuristic_score'
         ]
         
         for pattern in our_engineered_patterns:
@@ -129,7 +200,7 @@ class FeatureEngineer:
         # Show sample of features in each set
         print(f"\nSample of paper's features: {paper_16_features[:5]}...")
         print(f"Sample of our features: {our_features[:5]}...")
-        
+
         return {
             'paper_16': paper_16_features,
             'our_enhanced': our_features,

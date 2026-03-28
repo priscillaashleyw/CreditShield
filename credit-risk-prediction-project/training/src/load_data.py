@@ -106,6 +106,87 @@ class DataLoader:
         csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
         self.data_path = csvs[0]
         print(f"Using downloaded CSV: {self.data_path}")
+    
+    def _merge_external_macro_features(self, df):
+        """
+        Merge monthly external macro data to each loan using issue month.
+        Expected files:
+            data/external_macro/FEDFUNDS.csv
+            data/external_macro/UNRATE.csv
+
+        Each file is expected to have:
+            observation_date,<series_name>
+        e.g.
+            observation_date,FEDFUNDS
+            observation_date,UNRATE
+        """
+        macro_dir = Path(self.config['paths']['external_macro_data'])
+
+        fed_path = macro_dir / "FEDFUNDS.csv"
+        unrate_path = macro_dir / "UNRATE.csv"
+
+        if not fed_path.exists() or not unrate_path.exists():
+            print(
+                f"⚠️ External macro files not found: {fed_path} and/or {unrate_path}. "
+                "Skipping external features."
+            )
+            return df
+
+        # Read separate FRED files
+        fed = pd.read_csv(fed_path)
+        unrate = pd.read_csv(unrate_path)
+
+        # Standardize column names
+        fed = fed.rename(columns={"observation_date": "date", "FEDFUNDS": "fed_funds_rate"})
+        unrate = unrate.rename(columns={"observation_date": "date", "UNRATE": "unemployment_rate"})
+
+        # Parse dates and numeric values
+        fed["date"] = pd.to_datetime(fed["date"], errors="coerce")
+        unrate["date"] = pd.to_datetime(unrate["date"], errors="coerce")
+
+        fed["fed_funds_rate"] = pd.to_numeric(fed["fed_funds_rate"], errors="coerce")
+        unrate["unemployment_rate"] = pd.to_numeric(unrate["unemployment_rate"], errors="coerce")
+
+        # Merge the two macro series together
+        macro = fed.merge(unrate, on="date", how="outer").sort_values("date").reset_index(drop=True)
+
+        # Forward fill missing monthly values if needed
+        macro[["fed_funds_rate", "unemployment_rate"]] = (
+            macro[["fed_funds_rate", "unemployment_rate"]].ffill()
+        )
+
+        # Engineer macro features on the macro table first
+        macro["fed_funds_rate_3m_change"] = (
+            macro["fed_funds_rate"] - macro["fed_funds_rate"].shift(3)
+        )
+        macro["unemployment_rate_3m_change"] = (
+            macro["unemployment_rate"] - macro["unemployment_rate"].shift(3)
+        )
+
+        macro["rate_tightening_flag"] = (
+            macro["fed_funds_rate_3m_change"] > 0
+        ).astype("int8")
+
+        macro["unemployment_rising_flag"] = (
+            macro["unemployment_rate_3m_change"] > 0
+        ).astype("int8")
+
+        # Align loan issue dates to month start
+        df = df.copy()
+        df["issue_month"] = df["issue_date"].dt.to_period("M").dt.to_timestamp()
+
+        # Merge macro features into loan data
+        df = df.merge(
+            macro,
+            left_on="issue_month",
+            right_on="date",
+            how="left"
+        )
+
+        df = df.drop(columns=["date"], errors="ignore")
+
+        print("✓ External macro features merged from FEDFUNDS.csv and UNRATE.csv")
+        return df
         
     def load_and_filter_data(self):
         """
@@ -185,6 +266,9 @@ class DataLoader:
         # Convert dates
         df['issue_date'] = pd.to_datetime(df['issue_d'], format='%b-%Y', errors='coerce')
         df['issue_year'] = df['issue_date'].dt.year
+        
+        # Insert external macro features
+        df = self._merge_external_macro_features(df)
         
         # Filter by years 2013-2014 as per paper
         if years:

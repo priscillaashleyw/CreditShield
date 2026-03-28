@@ -11,7 +11,8 @@ CONFIG = {
         'models_dir': 'models',
         'results_dir': 'results',
         'logs_dir': 'logs',
-        'visualizations_dir': 'results'
+        'visualizations_dir': 'results',
+        'external_macro_data': 'credit-risk-prediction-project/training/data/external_macro'
     },
     
     # Data settings (following paper's methodology)
