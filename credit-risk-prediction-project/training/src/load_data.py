@@ -83,7 +83,6 @@ class DataLoader:
             [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
             check=True
         )
-        )
 
         # After download, resolve the actual CSV
         if self.data_path.exists():
