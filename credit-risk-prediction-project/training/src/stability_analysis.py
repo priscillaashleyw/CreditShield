@@ -91,7 +91,6 @@ def evaluate_by_segment(df, segment_col):
 def run_stability_analysis(
     eval_df,
     issue_date_col="issue_date",
-    grade_col="grade",
     income_col="annual_inc",
     loan_col="loan_amnt",
 ):
@@ -105,9 +104,6 @@ def run_stability_analysis(
 
     if "issue_year" in df.columns:
         outputs["by_year"] = evaluate_by_segment(df, "issue_year")
-
-    if grade_col in df.columns:
-        outputs["by_grade"] = evaluate_by_segment(df, grade_col)
 
     if "income_bucket" in df.columns:
         outputs["by_income_bucket"] = evaluate_by_segment(df, "income_bucket")

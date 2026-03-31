@@ -1,0 +1,13 @@
+{
+  "timestamp": "20260331_205738",
+  "training_mode": "sampled",
+  "sample_size": 50000,
+  "best_threshold": 0.8500000000000003,
+  "best_auc_roc": 0.9235852858910542,
+  "best_model": "XGBoost",
+  "best_features": "our_enhanced",
+  "improvement": {
+    "paper_16_avg_auc": 0.9068803447104858,
+    "our_enhanced_avg_auc": 0.8968658823498871
+  }
+}

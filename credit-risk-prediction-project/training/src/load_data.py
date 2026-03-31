@@ -201,7 +201,7 @@ class DataLoader:
         years = self.config['data_settings']['years']
         
         # Define optimized dtypes for common columns
-        dtype_optimization = {
+        '''dtype_optimization = {
             'loan_amnt': 'float32',
             'int_rate': 'float32',
             'annual_inc': 'float32',
@@ -214,6 +214,16 @@ class DataLoader:
             'total_acc': 'int16',
             'collections_12_mths_ex_med': 'int8',
             'acc_now_delinq': 'int8',
+            'tot_coll_amt': 'float32',
+            'tot_cur_bal': 'float32',
+            'total_rev_hi_lim': 'float32'
+        }'''
+        dtype_optimization = {
+            'loan_amnt': 'float32',
+            'int_rate': 'float32',
+            'annual_inc': 'float32',
+            'dti': 'float32',
+            'revol_bal': 'float32',
             'tot_coll_amt': 'float32',
             'tot_cur_bal': 'float32',
             'total_rev_hi_lim': 'float32'

@@ -341,7 +341,6 @@ def main():
             stability_results = run_stability_analysis(
                 eval_df,
                 issue_date_col="issue_date",   # use your actual column name
-                grade_col="grade",
                 income_col="annual_inc",
                 loan_col="loan_amnt",
             )
