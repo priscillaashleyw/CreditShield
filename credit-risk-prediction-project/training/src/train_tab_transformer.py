@@ -1,321 +1,568 @@
 """
-TabTransformer Trainer - Training loop for credit risk prediction
+train_tab_transformer.py
+========================
+Training and evaluation pipeline for the TabTransformer credit-risk model.
+
+Integrates with load_data.DataLoader:
+  - Call prepare_data() with the DataFrames from DataLoader.random_split()
+  - Call train() to run the full pipeline
+
+Pipeline design
+---------------
+  Categorical features → LabelEncoder → Embedding + Transformer layers
+  Numerical features   → median imputation + StandardScaler → bypass path
+  Both streams         → concatenated → MLP → sigmoid → P(default)
+
+Loss
+----
+  Weighted BCELoss (model already outputs sigmoid probabilities).
+  Positive-class weight = n_neg / n_pos to compensate for class imbalance.
+
+Early stopping
+--------------
+  Tracks AUC + F1 combined score; saves best checkpoint automatically.
 """
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
+from sklearn.metrics import (
+    confusion_matrix,
+    mean_absolute_error,
+    precision_recall_curve,
+    roc_auc_score,
+)
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import roc_auc_score, confusion_matrix, mean_absolute_error, precision_recall_curve
-import pandas as pd
-from pathlib import Path
-import json
-from datetime import datetime
+from torch.utils.data import DataLoader, TensorDataset
 
 from tab_transformer import TabTransformer
 
+
 class TabTransformerTrainer:
-    """Trainer for TabTransformer on credit risk data"""
-    
-    def __init__(self, config, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    """
+    Encapsulates the full train / evaluate pipeline for TabTransformer.
+
+    Parameters
+    ----------
+    config : dict
+        Loaded from tab_transformer_config.yaml.  Must contain keys:
+        paths, data_settings, model, batch_size, epochs, learning_rate,
+        weight_decay, early_stopping_patience.
+        Optional: categorical_features, numerical_features (explicit lists).
+    device : str
+        'cuda' or 'cpu'.  Auto-detected if not provided.
+    """
+
+    def __init__(self, config, device=None):
         self.config = config
-        self.device = device
-        self.numerical_features = config.get('numerical_features', [])
-        self.categorical_features = config.get('categorical_features', [])
-        self.target_col = 'target'
-        self.label_encoders = {}
-        self.best_threshold = 0.5
-        
-        # Create results directory
+        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # ── Feature lists ──────────────────────────────────────────────────
+        # Populated from config when explicit; otherwise auto-detected by dtype.
+        self._config_categorical: list = config.get('categorical_features', []) or []
+        self._config_numerical:   list = config.get('numerical_features',   []) or []
+
+        self.categorical_features: list = []
+        self.numerical_features:   list = []
+        self.categorical_dims:     list = []   # vocabulary size per categorical col
+
+        # ── Fitted preprocessing objects ───────────────────────────────────
+        self.label_encoders: dict = {}         # col → LabelEncoder (fit on train)
+        self.scaler: StandardScaler = None     # fit on train numerical features
+
+        # ── Threshold used when converting probabilities to class predictions
+        self.best_threshold: float = 0.5
+
+        # ── DataLoaders (populated by prepare_data) ────────────────────────
+        self.train_loader = None
+        self.test_loader  = None
+
+        # ── Positive-class weight for imbalanced BCE loss ──────────────────
+        self.pos_weight = None
+
+        # Output directory for checkpoints and history
         self.results_dir = Path(__file__).parent.parent / 'results'
         self.results_dir.mkdir(parents=True, exist_ok=True)
-    
-    def prepare_data(self, X_train, X_test, y_train, y_test):
-        """Prepare data for TabTransformer (encode categoricals, normalize numericals)"""
+
+    # ======================================================================
+    # Data preparation
+    # ======================================================================
+
+    def prepare_data(
+        self,
+        X_train: pd.DataFrame,
+        X_test:  pd.DataFrame,
+        y_train: pd.Series,
+        y_test:  pd.Series,
+    ):
+        """
+        Prepare train and test splits for TabTransformer.
+
+        Steps
+        -----
+        1. Drop metadata columns not useful for modelling (issue dates).
+        2. Determine numerical vs categorical feature lists:
+           - Use explicit config lists filtered to columns that actually exist.
+           - Auto-add any unlisted numeric columns (e.g. dynamic _missing
+             indicator columns added by load_data.py).
+           - Fall back to dtype auto-detection when config lists are empty.
+        3. Numerical:  coerce to float → median imputation → StandardScaler.
+        4. Categorical: fillna('NA') → LabelEncoder (train); unseen test
+           categories are mapped to index 0 (a safe fallback).
+        5. Compute positive-class weight for imbalanced loss.
+        6. Build PyTorch TensorDatasets and DataLoaders.
+
+        Returns
+        -------
+        (train_loader, test_loader) – both are torch.utils.data.DataLoader
+        """
         print("\nPreparing data for TabTransformer...")
-        
-        # Remove non-feature columns
-        cols_to_drop = ['issue_d', 'issue_date', 'issue_year']
-        X_train = X_train.drop(columns=[c for c in cols_to_drop if c in X_train.columns], errors='ignore')
-        X_test = X_test.drop(columns=[c for c in cols_to_drop if c in X_test.columns], errors='ignore')
-        
-        # Identify numerical and categorical columns
-        if not self.numerical_features:
-            self.numerical_features = X_train.select_dtypes(include=['float64', 'float32', 'int64', 'int32', 'int16', 'int8']).columns.tolist()
-        
-        if not self.categorical_features:
-            self.categorical_features = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
-        
-        print(f"  Numerical features: {len(self.numerical_features)}")
+
+        # ── 1. Drop metadata columns ───────────────────────────────────────
+        meta_cols = ['issue_d', 'issue_date', 'issue_year']
+        X_train = X_train.drop(columns=[c for c in meta_cols if c in X_train.columns],
+                                errors='ignore')
+        X_test  = X_test.drop(columns=[c for c in meta_cols if c in X_test.columns],
+                               errors='ignore')
+
+        # ── 2a. Categorical feature list ──────────────────────────────────
+        if self._config_categorical:
+            # Filter to columns that actually arrived in the DataFrame
+            self.categorical_features = [
+                c for c in self._config_categorical if c in X_train.columns
+            ]
+            missing = [c for c in self._config_categorical if c not in X_train.columns]
+            if missing:
+                print(f"  [WARN] Categorical cols in config but absent in data: {missing}")
+        else:
+            # Fallback: auto-detect by dtype
+            self.categorical_features = (
+                X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+            )
+
+        # ── 2b. Numerical feature list ────────────────────────────────────
+        known_cols = set(self.categorical_features) | set(meta_cols)
+
+        if self._config_numerical:
+            self.numerical_features = [
+                c for c in self._config_numerical if c in X_train.columns
+            ]
+            missing_num = [c for c in self._config_numerical if c not in X_train.columns]
+            if missing_num:
+                print(f"  [WARN] Numerical cols in config but absent in data: {missing_num}")
+
+            # Auto-capture any numeric columns NOT in either explicit list.
+            # This picks up dynamic columns added by load_data.py at runtime
+            # (e.g. mths_since_last_delinq_missing).
+            listed = set(self.numerical_features) | known_cols
+            extra_num = [
+                c for c in X_train.columns
+                if c not in listed
+                and pd.api.types.is_numeric_dtype(X_train[c])
+            ]
+            if extra_num:
+                print(f"  Auto-adding {len(extra_num)} unlisted numeric col(s): {extra_num}")
+                self.numerical_features.extend(extra_num)
+        else:
+            # Fallback: auto-detect by dtype, exclude categorical columns
+            self.numerical_features = [
+                c for c in X_train.select_dtypes(
+                    include=['float64', 'float32', 'int64', 'int32', 'int16', 'int8']
+                ).columns
+                if c not in known_cols
+            ]
+
+        print(f"  Numerical features  : {len(self.numerical_features)}")
         print(f"  Categorical features: {len(self.categorical_features)}")
-        
-        # Handle NaN in numerical features
+
+        if not self.categorical_features:
+            raise ValueError(
+                "TabTransformer requires at least 1 categorical feature.\n"
+                "Set 'categorical_features' in tab_transformer_config.yaml "
+                "or ensure the data contains string/category columns."
+            )
+
+        # ── 3. Numerical: impute then scale ───────────────────────────────
         X_train_num = X_train[self.numerical_features].copy()
-        X_test_num = X_test[self.numerical_features].copy()
-        
+        X_test_num  = X_test[self.numerical_features].copy()
+
+        # Coerce to float (handles edge cases where a numeric col is stored
+        # as object with stray string values)
+        for col in self.numerical_features:
+            X_train_num[col] = pd.to_numeric(X_train_num[col], errors='coerce')
+            X_test_num[col]  = pd.to_numeric(X_test_num[col],  errors='coerce')
+
+        # Impute NaN with train-set column median (no test leakage)
         for col in self.numerical_features:
             median_val = X_train_num[col].median()
             X_train_num[col] = X_train_num[col].fillna(median_val)
-            X_test_num[col] = X_test_num[col].fillna(median_val)
-        
-        # Encode categorical features
+            X_test_num[col]  = X_test_num[col].fillna(median_val)
+
+        self.scaler = StandardScaler()
+        X_train_num_scaled = self.scaler.fit_transform(X_train_num)   # fit on train
+        X_test_num_scaled  = self.scaler.transform(X_test_num)        # transform only
+
+        # ── 4. Categorical: label-encode each column ──────────────────────
         X_train_cat = pd.DataFrame(index=X_train.index)
-        X_test_cat = pd.DataFrame(index=X_test.index)
+        X_test_cat  = pd.DataFrame(index=X_test.index)
         self.categorical_dims = []
-        
+
         for col in self.categorical_features:
             le = LabelEncoder()
-            X_train_cat[col] = le.fit_transform(X_train[col].fillna('NA').astype(str))
-            X_test_col = X_test[col].fillna('NA').astype(str)
-            X_test_cat[col] = X_test_col.apply(lambda x: le.transform([x])[0] if x in le.classes_ else 0)
+            # Use 'NA' as the explicit missing category
+            train_vals = X_train[col].fillna('NA').astype(str)
+            le.fit(train_vals)
+            X_train_cat[col] = le.transform(train_vals)
+
+            # Map unseen test categories to index 0 (safe fallback)
+            test_vals = X_test[col].fillna('NA').astype(str)
+            X_test_cat[col] = test_vals.apply(
+                lambda x: le.transform([x])[0] if x in le.classes_ else 0
+            )
+
             self.label_encoders[col] = le
             self.categorical_dims.append(len(le.classes_))
             print(f"    {col}: {len(le.classes_)} categories")
-        
-        # Normalize numerical features
-        scaler = StandardScaler()
-        X_train_num_scaled = scaler.fit_transform(X_train_num)
-        X_test_num_scaled = scaler.transform(X_test_num)
-        self.scaler = scaler
-        
-        # Calculate class weights for imbalanced data
+
+        # ── 5. Positive-class weight for imbalanced BCE ───────────────────
         n_samples = len(y_train)
-        n_pos = y_train.sum()
-        n_neg = n_samples - n_pos
-        
-        # Weight for positive class (defaults) - used in BCELoss
-        self.pos_weight = torch.FloatTensor([n_neg / n_pos]).to(self.device) if n_pos > 0 else torch.FloatTensor([1.0]).to(self.device)
-        print(f"\n  Class imbalance ratio: {n_neg/n_pos:.2f}:1 (negative:positive)")
-        print(f"  Positive class weight: {self.pos_weight.item():.2f}")
-        
-        # Convert to tensors
-        X_train_num_tensor = torch.FloatTensor(X_train_num_scaled).to(self.device)
-        X_test_num_tensor = torch.FloatTensor(X_test_num_scaled).to(self.device)
-        X_train_cat_tensor = torch.LongTensor(X_train_cat.values).to(self.device)
-        X_test_cat_tensor = torch.LongTensor(X_test_cat.values).to(self.device)
-        
-        # Changed: use FloatTensor for BCE loss
-        y_train_tensor = torch.FloatTensor(y_train.values).to(self.device)
-        y_test_tensor = torch.FloatTensor(y_test.values).to(self.device)
-        
-        # Create datasets
-        train_dataset = TensorDataset(X_train_num_tensor, X_train_cat_tensor, y_train_tensor)
-        test_dataset = TensorDataset(X_test_num_tensor, X_test_cat_tensor, y_test_tensor)
-        
+        n_pos     = int(y_train.sum())
+        n_neg     = n_samples - n_pos
+        self.pos_weight = (
+            torch.FloatTensor([n_neg / n_pos]).to(self.device)
+            if n_pos > 0 else torch.FloatTensor([1.0]).to(self.device)
+        )
+        print(f"\n  Class imbalance ratio  : {n_neg / n_pos:.2f}:1 (neg:pos)")
+        print(f"  Positive-class weight  : {self.pos_weight.item():.2f}")
+
+        # ── 6. Build PyTorch tensors and DataLoaders ──────────────────────
+        X_train_num_t = torch.FloatTensor(X_train_num_scaled).to(self.device)
+        X_test_num_t  = torch.FloatTensor(X_test_num_scaled).to(self.device)
+        X_train_cat_t = torch.LongTensor(X_train_cat.values).to(self.device)
+        X_test_cat_t  = torch.LongTensor(X_test_cat.values).to(self.device)
+        # Float targets required by BCELoss
+        y_train_t = torch.FloatTensor(y_train.values).to(self.device)
+        y_test_t  = torch.FloatTensor(y_test.values).to(self.device)
+
         batch_size = int(self.config.get('batch_size', 256))
-        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        self.test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-        
-        print(f"  Train batches: {len(self.train_loader)}, Test batches: {len(self.test_loader)}")
+        train_dataset = TensorDataset(X_train_num_t, X_train_cat_t, y_train_t)
+        test_dataset  = TensorDataset(X_test_num_t,  X_test_cat_t,  y_test_t)
+
+        self.train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, drop_last=False
+        )
+        self.test_loader  = DataLoader(
+            test_dataset,  batch_size=batch_size, shuffle=False
+        )
+
+        print(f"  Train batches: {len(self.train_loader)}, "
+              f"Test batches: {len(self.test_loader)}")
         return self.train_loader, self.test_loader
-    
-    def build_model(self):
-        """Build TabTransformer model"""
-        model_config = self.config.get('model', {})
-        
-        if len(self.categorical_features) == 0:
-            raise ValueError("TabTransformer requires at least 1 categorical feature")
-        
+
+    # ======================================================================
+    # Model construction
+    # ======================================================================
+
+    def build_model(self) -> TabTransformer:
+        """
+        Instantiate TabTransformer from config hyperparameters.
+
+        Clamps attention heads to never exceed num_categorical_features
+        (the transformer sequence length).
+        """
+        model_cfg = self.config.get('model', {})
+
+        # heads must be <= sequence length (num_categorical_features)
+        heads = min(
+            int(model_cfg.get('heads', 4)),
+            len(self.categorical_features)
+        )
+
         model = TabTransformer(
-            num_numerical_features=len(self.numerical_features),
-            num_categorical_features=len(self.categorical_features),
-            categorical_dims=self.categorical_dims,
-            embedding_dim=int(model_config.get('embedding_dim', 32)),
-            depth=int(model_config.get('depth', 4)),
-            heads=min(int(model_config.get('heads', 4)), len(self.categorical_features)),
-            dim_head=int(model_config.get('dim_head', 32)),
-            mlp_dim=int(model_config.get('mlp_dim', 256)),
-            num_classes=1,  # Single probability output
-            dropout=float(model_config.get('dropout', 0.2))
+            num_numerical_features  = len(self.numerical_features),
+            num_categorical_features= len(self.categorical_features),
+            categorical_dims        = self.categorical_dims,
+            embedding_dim           = int(model_cfg.get('embedding_dim', 32)),
+            depth                   = int(model_cfg.get('depth', 4)),
+            heads                   = heads,
+            dim_head                = int(model_cfg.get('dim_head', 32)),
+            mlp_dim                 = int(model_cfg.get('mlp_dim', 256)),
+            num_classes             = 1,          # single sigmoid output
+            dropout                 = float(model_cfg.get('dropout', 0.2)),
         ).to(self.device)
-        
-        num_params = sum(p.numel() for p in model.parameters())
-        print(f"\n  Model created with {num_params:,} parameters")
-        
+
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"\n  TabTransformer built  : {n_params:,} parameters")
+        print(f"    Categorical tokens  : {len(self.categorical_features)} "
+              f"(embed_dim={model_cfg.get('embedding_dim', 32)})")
+        print(f"    Numerical bypass    : {len(self.numerical_features)} features")
+        print(f"    Attention heads     : {heads}, depth={model_cfg.get('depth', 4)}, "
+              f"dim_head={model_cfg.get('dim_head', 32)}")
         return model
-    
-    def train_epoch(self, model, optimizer, criterion, epoch):
-        """Train one epoch"""
+
+    # ======================================================================
+    # Loss function
+    # ======================================================================
+
+    def _weighted_bce_loss(self, probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Weighted Binary Cross-Entropy loss for imbalanced classes.
+
+        Because the model already applies sigmoid, we use BCELoss (not
+        BCEWithLogitsLoss).  Positive-class samples are up-weighted by
+        pos_weight = n_neg / n_pos to compensate for class imbalance.
+
+        Args:
+            probs   : (batch,) predicted probabilities in [0, 1]
+            targets : (batch,) binary float labels {0.0, 1.0}
+        Returns:
+            Scalar weighted mean loss.
+        """
+        bce = nn.functional.binary_cross_entropy(probs, targets, reduction='none')
+        weights = torch.where(
+            targets == 1,
+            self.pos_weight.expand_as(targets),
+            torch.ones_like(targets),
+        )
+        return (bce * weights).mean()
+
+    # ======================================================================
+    # Training
+    # ======================================================================
+
+    def train_epoch(self, model: TabTransformer, optimizer: optim.Optimizer) -> float:
+        """
+        Run one full training epoch.
+
+        Returns the mean training loss over all batches.
+        """
         model.train()
-        total_loss = 0
-        
-        for batch_idx, (X_num, X_cat, y) in enumerate(self.train_loader):
+        total_loss = 0.0
+
+        for X_num, X_cat, y in self.train_loader:
             optimizer.zero_grad()
-            probs = model(X_num, X_cat)  # Now outputs probability directly
-            loss = criterion(probs, y)
+            probs = model(X_num, X_cat)           # → (batch,) in [0, 1]
+            loss  = self._weighted_bce_loss(probs, y)
             loss.backward()
+            # Gradient clipping prevents exploding gradients in deep transformers
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
-        
+
         return total_loss / len(self.train_loader)
-    
-    def find_optimal_threshold(self, labels, probs):
-        """Find optimal threshold using precision-recall curve"""
+
+    # ======================================================================
+    # Evaluation
+    # ======================================================================
+
+    def find_optimal_threshold(self, labels: np.ndarray, probs: np.ndarray) -> float:
+        """
+        Find the decision threshold that maximises F1 on the
+        precision-recall curve.
+        """
         precisions, recalls, thresholds = precision_recall_curve(labels, probs)
-        
-        # Find threshold that maximizes F1
         f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
-        best_idx = np.argmax(f1_scores)
-        
-        if best_idx < len(thresholds):
-            return thresholds[best_idx]
-        return 0.5
-    
-    def evaluate(self, model, find_threshold=False):
-        """Evaluate model on test set"""
+        best_idx  = np.argmax(f1_scores)
+        return float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
+
+    def evaluate(self, model: TabTransformer, find_threshold: bool = False):
+        """
+        Evaluate the model on the held-out test set.
+
+        Args:
+            model          : Trained TabTransformer.
+            find_threshold : If True, re-tune the decision threshold via
+                             the precision-recall curve (use every 5 epochs
+                             during training, and once on the final model).
+
+        Returns:
+            metrics   : dict with AUC, accuracy, precision, recall, F1,
+                        MAE, optimal threshold, and confusion-matrix counts.
+            all_probs : np.ndarray of predicted default probabilities.
+        """
         model.eval()
-        all_probs, all_labels = [], []
-        
+        all_probs:  list = []
+        all_labels: list = []
+
         with torch.no_grad():
             for X_num, X_cat, y in self.test_loader:
-                probs = model(X_num, X_cat)  # Direct probability output (0-1)
+                probs = model(X_num, X_cat)   # already (0-1) via sigmoid
                 all_probs.extend(probs.cpu().numpy())
                 all_labels.extend(y.cpu().numpy())
-        
-        all_probs = np.array(all_probs)
+
+        all_probs  = np.array(all_probs)
         all_labels = np.array(all_labels)
-        
-        # Find optimal threshold if requested
+
+        # Optionally re-calibrate decision threshold
         if find_threshold:
             self.best_threshold = self.find_optimal_threshold(all_labels, all_probs)
-        
-        # Apply threshold
+
         all_preds = (all_probs >= self.best_threshold).astype(int)
-        
+
+        # ── Classification metrics ────────────────────────────────────────
         try:
             auc = roc_auc_score(all_labels, all_probs)
-        except:
-            auc = 0.5
-        
+        except ValueError:
+            auc = 0.5   # undefined when only one class present
+
         mae = mean_absolute_error(all_labels, all_probs)
-        
-        # Handle edge cases in confusion matrix
-        cm = confusion_matrix(all_labels.astype(int), all_preds, labels=[0, 1])
+        cm  = confusion_matrix(all_labels.astype(int), all_preds, labels=[0, 1])
         tn, fp, fn, tp = cm.ravel()
-        
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)
+              if (precision + recall) > 0 else 0.0)
+
         return {
-            'auc': auc, 
-            'accuracy': (tp + tn) / (tp + tn + fp + fn),
-            'precision': precision, 
-            'recall': recall, 
-            'f1': f1, 
-            'mae': mae,
-            'threshold': self.best_threshold,
-            'true_positives': int(tp), 
-            'true_negatives': int(tn),
-            'false_positives': int(fp), 
-            'false_negatives': int(fn)
+            'auc':             auc,
+            'accuracy':        (tp + tn) / (tp + tn + fp + fn),
+            'precision':       precision,
+            'recall':          recall,
+            'f1':              f1,
+            'mae':             mae,
+            'threshold':       self.best_threshold,
+            'true_positives':  int(tp),
+            'true_negatives':  int(tn),
+            'false_positives': int(fp),
+            'false_negatives': int(fn),
         }, all_probs
-    
-    def train(self, X_train, X_test, y_train, y_test):
-        """Full training pipeline with class weighting and threshold tuning"""
+
+    # ======================================================================
+    # Full training pipeline
+    # ======================================================================
+
+    def train(
+        self,
+        X_train: pd.DataFrame,
+        X_test:  pd.DataFrame,
+        y_train: pd.Series,
+        y_test:  pd.Series,
+    ):
+        """
+        Full pipeline: prepare → build → train loop → evaluate.
+
+        Training details
+        ----------------
+        - Optimiser  : AdamW (weight decay for regularisation)
+        - Scheduler  : CosineAnnealingWarmRestarts (smooth LR decay + warm restarts)
+        - Loss       : Weighted BCELoss (pos_weight for class imbalance)
+        - Stopping   : Early stopping on AUC + F1; best checkpoint is reloaded
+        - Threshold  : Decision threshold re-tuned every 5 epochs and at end
+
+        Args:
+            X_train, X_test : DataFrames from DataLoader.random_split()
+            y_train, y_test : binary Series (1 = default, 0 = good)
+
+        Returns:
+            model   : best TabTransformer loaded from checkpoint
+            metrics : dict of final test-set metrics
+        """
+        # ── Stage 1: data preparation ─────────────────────────────────────
         self.prepare_data(X_train, X_test, y_train, y_test)
+
+        # ── Stage 2: model construction ───────────────────────────────────
         model = self.build_model()
-        
-        # Convert config values
-        learning_rate = float(self.config.get('learning_rate', 0.0005))
+
+        # ── Stage 3: training configuration ──────────────────────────────
+        lr           = float(self.config.get('learning_rate', 0.0005))
         weight_decay = float(self.config.get('weight_decay', 0.01))
-        epochs = int(self.config.get('epochs', 100))
-        patience = int(self.config.get('early_stopping_patience', 15))
-        
-        # Use BCELoss with pos_weight for class imbalance
-        criterion = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight)
-        # Note: Since model outputs sigmoid already, we use BCELoss instead
-        criterion = nn.BCELoss(reduction='none')
-        
-        # Custom weighted BCE loss function
-        def weighted_bce_loss(probs, targets):
-            bce = criterion(probs, targets)
-            weights = torch.where(targets == 1, self.pos_weight, torch.ones_like(targets))
-            return (bce * weights).mean()
-        
-        # Use AdamW optimizer
-        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        
-        # Learning rate scheduler
-        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
-        
-        best_auc = 0
-        patience_counter = 0
-        history = {'train_loss': [], 'val_auc': [], 'val_f1': [], 'val_recall': []}
-        
-        print(f"\nStarting training for {epochs} epochs...")
-        print(f"  Learning rate: {learning_rate}, Weight decay: {weight_decay}")
-        print(f"  Using weighted BCE loss for probability output (0-1)")
-        print("-" * 60)
-        
+        epochs       = int(self.config.get('epochs', 100))
+        patience     = int(self.config.get('early_stopping_patience', 15))
+
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        # Cosine annealing with warm restarts: T_0=10 epochs first cycle,
+        # doubles each subsequent cycle (T_mult=2)
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=10, T_mult=2
+        )
+
+        best_score   = 0.0
+        patience_ctr = 0
+        checkpoint   = self.results_dir / 'best_tab_transformer.pth'
+        history      = {'train_loss': [], 'val_auc': [], 'val_f1': [], 'val_recall': []}
+
+        print(f"\nStarting training for up to {epochs} epochs "
+              f"(patience={patience}) ...")
+        print(f"  LR={lr}, weight_decay={weight_decay}, "
+              f"batch_size={self.config.get('batch_size', 256)}, "
+              f"device={self.device}")
+        print("-" * 65)
+
+        # ── Stage 4: training loop ────────────────────────────────────────
         for epoch in range(epochs):
-            # Train epoch with weighted BCE
-            model.train()
-            total_loss = 0
-            for X_num, X_cat, y in self.train_loader:
-                optimizer.zero_grad()
-                probs = model(X_num, X_cat)
-                loss = weighted_bce_loss(probs, y)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                total_loss += loss.item()
-            train_loss = total_loss / len(self.train_loader)
-            
+            train_loss = self.train_epoch(model, optimizer)
             scheduler.step()
-            
-            # Find optimal threshold every 5 epochs
+
+            # Re-tune decision threshold every 5 epochs
             find_thresh = (epoch % 5 == 0)
-            metrics, _ = self.evaluate(model, find_threshold=find_thresh)
-            
+            metrics, _  = self.evaluate(model, find_threshold=find_thresh)
+
             history['train_loss'].append(train_loss)
             history['val_auc'].append(metrics['auc'])
             history['val_f1'].append(metrics['f1'])
             history['val_recall'].append(metrics['recall'])
-            
-            current_lr = optimizer.param_groups[0]['lr']
-            print(f"\nEpoch {epoch+1}/{epochs} - Loss: {train_loss:.4f} (LR: {current_lr:.6f})")
-            print(f"  AUC: {metrics['auc']:.4f} | F1: {metrics['f1']:.4f} | Prec: {metrics['precision']:.4f} | Recall: {metrics['recall']:.4f}")
-            print(f"  Threshold: {metrics['threshold']:.3f} | TP: {metrics['true_positives']} | FP: {metrics['false_positives']}")
-            
-            # Use F1 score for early stopping (better for imbalanced data)
-            score = metrics['auc'] + metrics['f1']  # Combined metric
-            if score > best_auc:
-                best_auc = score
-                patience_counter = 0
-                torch.save(model.state_dict(), self.results_dir / 'best_tab_transformer.pth')
-                print(f"  ✓ Best model saved (AUC+F1: {score:.4f})")
+
+            cur_lr = optimizer.param_groups[0]['lr']
+            print(f"\nEpoch {epoch + 1:3d}/{epochs} │ "
+                  f"Loss: {train_loss:.4f} │ LR: {cur_lr:.2e}")
+            print(f"  AUC: {metrics['auc']:.4f} │ "
+                  f"F1: {metrics['f1']:.4f} │ "
+                  f"Prec: {metrics['precision']:.4f} │ "
+                  f"Rec: {metrics['recall']:.4f}")
+            print(f"  Threshold: {metrics['threshold']:.3f} │ "
+                  f"TP: {metrics['true_positives']:,} │ "
+                  f"FP: {metrics['false_positives']:,}")
+
+            # Combined score for early stopping (penalises poor recall)
+            score = metrics['auc'] + metrics['f1']
+            if score > best_score:
+                best_score   = score
+                patience_ctr = 0
+                torch.save(model.state_dict(), checkpoint)
+                print(f"  ✓ Best model saved (AUC+F1={score:.4f})")
             else:
-                patience_counter += 1
-            
-            if patience_counter >= patience:
-                print(f"\n⚠️ Early stopping after {epoch+1} epochs")
+                patience_ctr += 1
+
+            if patience_ctr >= patience:
+                print(f"\n⚠  Early stopping after epoch {epoch + 1} "
+                      f"(no improvement for {patience} epochs)")
                 break
-        
-        # Load best model and find final optimal threshold
-        model.load_state_dict(torch.load(self.results_dir / 'best_tab_transformer.pth', weights_only=True))
-        final_metrics, probs = self.evaluate(model, find_threshold=True)
-        
-        print("\n" + "=" * 60)
-        print("FINAL TEST SET RESULTS (Probability Output: 0-1)")
-        print("=" * 60)
-        print(f"  Optimal Threshold: {final_metrics['threshold']:.3f}")
-        print(f"  AUC-ROC:     {final_metrics['auc']:.4f}")
-        print(f"  Accuracy:    {final_metrics['accuracy']:.4f}")
-        print(f"  Precision:   {final_metrics['precision']:.4f}")
-        print(f"  Recall:      {final_metrics['recall']:.4f}")
-        print(f"  F1-Score:    {final_metrics['f1']:.4f}")
-        print(f"  MAE:         {final_metrics['mae']:.4f}")
-        print("-" * 60)
-        print("Confusion Matrix:")
-        print(f"  TP: {final_metrics['true_positives']:,} | FP: {final_metrics['false_positives']:,}")
-        print(f"  FN: {final_metrics['false_negatives']:,} | TN: {final_metrics['true_negatives']:,}")
-        print("=" * 60)
-        
-        # Save history
-        with open(self.results_dir / f"history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
+
+        # ── Stage 5: reload best checkpoint & final evaluation ────────────
+        model.load_state_dict(torch.load(checkpoint, weights_only=True))
+        final_metrics, _ = self.evaluate(model, find_threshold=True)
+
+        # ── Stage 6: print final report ───────────────────────────────────
+        print("\n" + "=" * 65)
+        print("FINAL TEST-SET RESULTS")
+        print("=" * 65)
+        print(f"  Optimal threshold : {final_metrics['threshold']:.4f}")
+        print(f"  AUC-ROC           : {final_metrics['auc']:.4f}")
+        print(f"  Accuracy          : {final_metrics['accuracy']:.4f}")
+        print(f"  Precision         : {final_metrics['precision']:.4f}")
+        print(f"  Recall            : {final_metrics['recall']:.4f}")
+        print(f"  F1-Score          : {final_metrics['f1']:.4f}")
+        print(f"  MAE               : {final_metrics['mae']:.4f}")
+        print("-" * 65)
+        print("  Confusion Matrix  (rows=actual, cols=predicted):")
+        print(f"    TP: {final_metrics['true_positives']:>7,}  │  "
+              f"FP: {final_metrics['false_positives']:>7,}")
+        print(f"    FN: {final_metrics['false_negatives']:>7,}  │  "
+              f"TN: {final_metrics['true_negatives']:>7,}")
+        print("=" * 65)
+
+        # ── Stage 7: persist training history ─────────────────────────────
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        history_path = self.results_dir / f'history_{ts}.json'
+        with open(history_path, 'w') as f:
             json.dump(history, f, indent=2)
-        
+        print(f"\n  Training history saved → {history_path}")
+
         return model, final_metrics

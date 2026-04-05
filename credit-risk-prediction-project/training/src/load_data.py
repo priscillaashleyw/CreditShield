@@ -14,35 +14,64 @@ class DataLoader:
     
     def __init__(self, config):
         self.config = config
-        raw = config['paths']['raw_data']
-        # If raw is a Kaggle URI, store it + set local cache path
+
+        # project root = credit-risk-prediction-project/training/src/.. /..
+        self.project_root = Path(__file__).resolve().parents[2]
+        self.training_dir = self.project_root / "training"
+
+        raw = config["paths"]["raw_data"]
+
         if isinstance(raw, str) and raw.startswith("kaggle://"):
-            self.kaggle_uri = raw 
+            self.kaggle_uri = raw
             filename = raw.split("/")[-1]
-            self.data_path = Path("training/data") / filename
+            self.data_path = self.training_dir / "data" / filename
         else:
             self.kaggle_uri = None
-            self.data_path = Path(raw)
+            raw_path = Path(raw)
+            if raw_path.is_absolute():
+                self.data_path = raw_path
+            else:
+                self.data_path = self.project_root / raw_path
     
     def _ensure_raw_data(self):
-        if self.data_path.exists():
-            return
+        import shutil
+        import subprocess
 
+        # Case 1: path already exists
+        if self.data_path.exists():
+            if self.data_path.is_file():
+                return
+
+            # If it exists but is a directory, try to resolve the real CSV inside it
+            if self.data_path.is_dir():
+                csvs = list(self.data_path.glob("*.csv")) + list(self.data_path.rglob("*.csv"))
+                if csvs:
+                    csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+                    self.data_path = csvs[0]
+                    print(f"Resolved directory to CSV: {self.data_path}")
+                    return
+
+                raise IsADirectoryError(
+                    f"Expected a CSV file, but found a directory with no CSV inside: {self.data_path}"
+                )
+
+        # Case 2: file missing and no Kaggle source
         if not self.kaggle_uri:
             raise FileNotFoundError(f"Data file not found: {self.data_path}")
 
-        # Parse kaggle:/<owner>/<dataset>/<file>
+        # Parse kaggle:///owner/dataset/file
         parts = self.kaggle_uri.replace("kaggle://", "").split("/")
         if len(parts) < 3:
             raise ValueError(f"Invalid Kaggle URI: {self.kaggle_uri}")
 
-        dataset = "/".join(parts[:2])   # owner/dataset
-        filename = "/".join(parts[2:])  # handle any extra slashes safely
+        dataset = "/".join(parts[:2])
+        filename = "/".join(parts[2:])
+        dataset = "/".join(parts[:2])
+        filename = "/".join(parts[2:])
         dest_dir = self.data_path.parent
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"Downloading from Kaggle: {dataset} (file={filename}) ...")
-        import shutil
 
         kaggle_exe = shutil.which("kaggle")
         if not kaggle_exe:
@@ -50,49 +79,113 @@ class DataLoader:
                 "Kaggle CLI not found on PATH. Try: pip install kaggle and restart terminal."
             )
 
-        try:
-            result = subprocess.run(
-                [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            print(result.stdout)
-        except subprocess.CalledProcessError as e:
-            print(f"Kaggle download failed: {e.stderr}")
-            print("\n" + "=" * 60)
-            print("MANUAL DOWNLOAD INSTRUCTIONS:")
-            print("=" * 60)
-            print(f"1. Go to: https://www.kaggle.com/datasets/{dataset}")
-            print(f"2. Click 'Download' button")
-            print(f"3. Extract the CSV file to: {dest_dir}")
-            print(f"4. Rename the file to: {self.data_path.name}")
-            print("=" * 60)
-            print("\nAlternatively, set up Kaggle API credentials:")
-            print("  1. Go to https://www.kaggle.com/settings/account")
-            print("  2. Click 'Create New Token' under API section")
-            print("  3. Save kaggle.json to ~/.kaggle/kaggle.json")
-            print("  4. Run: chmod 600 ~/.kaggle/kaggle.json")
-            print("=" * 60 + "\n")
-            raise FileNotFoundError(
-                f"Could not download dataset. Please download manually from "
-                f"https://www.kaggle.com/datasets/{dataset}"
-            )
+        subprocess.run(
+            [kaggle_exe, "datasets", "download", "-d", dataset, "-p", str(dest_dir), "--unzip"],
+            check=True
+        )
 
-        # After unzip, ensure the expected file exists
-        if not self.data_path.exists():
-            # fallback: pick any CSV in dest_dir
-            csvs = list(dest_dir.glob("*.csv"))
-            if not csvs:
-                csvs = list(dest_dir.rglob("*.csv"))
-            if not csvs:
-                raise FileNotFoundError(f"No CSV found after Kaggle download into {dest_dir}")
-            csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
-            # Use the largest CSV (most likely the main data file)
-            largest_csv = csvs[0]
-            print(f"Found CSV: {largest_csv.name}, using as data source")
-            if largest_csv != self.data_path:
-                largest_csv.rename(self.data_path)
+        # After download, resolve the actual CSV
+        if self.data_path.exists():
+            if self.data_path.is_file():
+                return
+            if self.data_path.is_dir():
+                csvs = list(self.data_path.glob("*.csv")) + list(self.data_path.rglob("*.csv"))
+                if csvs:
+                    csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+                    self.data_path = csvs[0]
+                    print(f"Resolved downloaded directory to CSV: {self.data_path}")
+                    return
+
+        csvs = list(dest_dir.glob("*.csv"))
+        if not csvs:
+            csvs = list(dest_dir.rglob("*.csv"))
+        if not csvs:
+            raise FileNotFoundError(f"No CSV found after Kaggle download into {dest_dir}")
+
+        csvs.sort(key=lambda p: p.stat().st_size, reverse=True)
+        self.data_path = csvs[0]
+        print(f"Using downloaded CSV: {self.data_path}")
+    
+    def _merge_external_macro_features(self, df):
+        """
+        Merge monthly external macro data to each loan using issue month.
+        Expected files:
+            data/external_macro/FEDFUNDS.csv
+            data/external_macro/UNRATE.csv
+
+        Each file is expected to have:
+            observation_date,<series_name>
+        e.g.
+            observation_date,FEDFUNDS
+            observation_date,UNRATE
+        """
+        macro_dir = Path(self.config['paths']['external_macro_data'])
+
+        fed_path = macro_dir / "FEDFUNDS.csv"
+        unrate_path = macro_dir / "UNRATE.csv"
+
+        if not fed_path.exists() or not unrate_path.exists():
+            print(
+                f"⚠️ External macro files not found: {fed_path} and/or {unrate_path}. "
+                "Skipping external features."
+            )
+            return df
+
+        # Read separate FRED files
+        fed = pd.read_csv(fed_path)
+        unrate = pd.read_csv(unrate_path)
+
+        # Standardize column names
+        fed = fed.rename(columns={"observation_date": "date", "FEDFUNDS": "fed_funds_rate"})
+        unrate = unrate.rename(columns={"observation_date": "date", "UNRATE": "unemployment_rate"})
+
+        # Parse dates and numeric values
+        fed["date"] = pd.to_datetime(fed["date"], errors="coerce")
+        unrate["date"] = pd.to_datetime(unrate["date"], errors="coerce")
+
+        fed["fed_funds_rate"] = pd.to_numeric(fed["fed_funds_rate"], errors="coerce")
+        unrate["unemployment_rate"] = pd.to_numeric(unrate["unemployment_rate"], errors="coerce")
+
+        # Merge the two macro series together
+        macro = fed.merge(unrate, on="date", how="outer").sort_values("date").reset_index(drop=True)
+
+        # Forward fill missing monthly values if needed
+        macro[["fed_funds_rate", "unemployment_rate"]] = (
+            macro[["fed_funds_rate", "unemployment_rate"]].ffill()
+        )
+
+        # Engineer macro features on the macro table first
+        macro["fed_funds_rate_3m_change"] = (
+            macro["fed_funds_rate"] - macro["fed_funds_rate"].shift(3)
+        )
+        macro["unemployment_rate_3m_change"] = (
+            macro["unemployment_rate"] - macro["unemployment_rate"].shift(3)
+        )
+
+        macro["rate_tightening_flag"] = (
+            macro["fed_funds_rate_3m_change"] > 0
+        ).astype("int8")
+
+        macro["unemployment_rising_flag"] = (
+            macro["unemployment_rate_3m_change"] > 0
+        ).astype("int8")
+
+        # Align loan issue dates to month start
+        df = df.copy()
+        df["issue_month"] = df["issue_date"].dt.to_period("M").dt.to_timestamp()
+
+        # Merge macro features into loan data
+        df = df.merge(
+            macro,
+            left_on="issue_month",
+            right_on="date",
+            how="left"
+        )
+
+        df = df.drop(columns=["date"], errors="ignore")
+
+        print("✓ External macro features merged from FEDFUNDS.csv and UNRATE.csv")
+        return df
         
     def load_and_filter_data(self):
         """
@@ -108,7 +201,7 @@ class DataLoader:
         years = self.config['data_settings']['years']
         
         # Define optimized dtypes for common columns
-        dtype_optimization = {
+        '''dtype_optimization = {
             'loan_amnt': 'float32',
             'int_rate': 'float32',
             'annual_inc': 'float32',
@@ -121,6 +214,16 @@ class DataLoader:
             'total_acc': 'int16',
             'collections_12_mths_ex_med': 'int8',
             'acc_now_delinq': 'int8',
+            'tot_coll_amt': 'float32',
+            'tot_cur_bal': 'float32',
+            'total_rev_hi_lim': 'float32'
+        }'''
+        dtype_optimization = {
+            'loan_amnt': 'float32',
+            'int_rate': 'float32',
+            'annual_inc': 'float32',
+            'dti': 'float32',
+            'revol_bal': 'float32',
             'tot_coll_amt': 'float32',
             'tot_cur_bal': 'float32',
             'total_rev_hi_lim': 'float32'
@@ -173,6 +276,9 @@ class DataLoader:
         df['issue_date'] = pd.to_datetime(df['issue_d'], format='%b-%Y', errors='coerce')
         df['issue_year'] = df['issue_date'].dt.year
         
+        # Insert external macro features
+        df = self._merge_external_macro_features(df)
+        
         # Filter by years 2013-2014 as per paper
         if years:
             mask_year = df['issue_year'].between(years[0], years[1])
@@ -215,8 +321,14 @@ class DataLoader:
         if 'revol_bal' in df.columns:
             df['revol_bal'] = np.log1p(df['revol_bal'])
 
-        # Clip utilization (robustness; outlier handling)
         if 'revol_util' in df.columns:
+            df['revol_util'] = (
+                df['revol_util']
+                .astype(str)
+                .str.replace('%', '', regex=False)
+                .replace('nan', np.nan)
+            )
+            df['revol_util'] = pd.to_numeric(df['revol_util'], errors='coerce')
             df['revol_util'] = df['revol_util'].clip(upper=120)
 
         return df

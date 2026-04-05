@@ -25,7 +25,7 @@ This document describes the implementation of **TabTransformer**, a deep learnin
 ## Task Description
 
 ### Problem Statement
-**Binary Classification** task to predict loan default probability.
+**Regression** task to predict loan default probability.
 
 Given a loan application with features like loan amount, interest rate, annual income, debt-to-income ratio, etc., predict the **probability (0-1)** that the loan will default.
 

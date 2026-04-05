@@ -2,17 +2,18 @@ default_rate_test: 0.182
 default_rate_train: 0.181875
 device: cpu
 metrics:
-  accuracy: 0.818
-  auc: 0.49064825761036035
-  f1: 0.0
-  false_negatives: 364.0
-  false_positives: 0.0
-  mae: 0.2696455121040344
-  precision: 0.0
-  recall: 0.0
-  true_negatives: 1636.0
-  true_positives: 0.0
+  accuracy: 0.2005
+  auc: 0.4928606692818184
+  f1: 0.3110728134424817
+  false_negatives: 3.0
+  false_positives: 1596.0
+  mae: 0.5085893273353577
+  precision: 0.18446601941747573
+  recall: 0.9917582417582418
+  threshold: 0.446731835603714
+  true_negatives: 40.0
+  true_positives: 361.0
 model_type: TabTransformer
-num_parameters: 406498
+num_parameters: 124897
 testing_samples: 2000
 training_samples: 8000

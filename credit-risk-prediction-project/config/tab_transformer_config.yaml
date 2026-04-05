@@ -1,29 +1,84 @@
+# =============================================================================
+# TabTransformer Configuration
+# Credit Risk Prediction – Lending Club Dataset
+# =============================================================================
+#
+# Design:
+#   Categorical features  → LabelEncoder → Embedding + Transformer layers
+#   Numerical features    → StandardScaler → bypass pathway → fused MLP
+#
+# load_data.py also adds three structural-missingness indicator columns
+# (mths_since_last_*_missing) for columns where NA means "never happened".
+# These are treated as numerical features (0/1 binary).
+# =============================================================================
+
 paths:
   raw_data: "kaggle://wordsforthewise/lending-club/accepted_2007_to_2018Q4.csv"
 
+# ---------------------------------------------------------------------------
+# Data loading & filtering  (consumed by load_data.DataLoader)
+# ---------------------------------------------------------------------------
 data_settings:
   essential_columns:
+    # ── Core loan attributes ──────────────────────────────────────────────
     - loan_amnt
     - int_rate
+    - term                     # categorical: "36 months" / "60 months"
+    - emp_length               # categorical: "< 1 year" … "10+ years"
+    - home_ownership           # categorical: RENT, OWN, MORTGAGE, OTHER
     - annual_inc
+    - verification_status      # categorical: Verified, Not Verified, Source Verified
+    - issue_d                  # used for date-column creation then dropped
+    - loan_status              # used for target creation then dropped
+    - purpose                  # categorical: debt_consolidation, credit_card, …
+    - addr_state               # categorical: 50 US states
+    - initial_list_status      # categorical: w / f
+
+    # ── Financial ratios & credit behavior ───────────────────────────────
     - dti
     - delinq_2yrs
     - inq_last_6mths
+    - mths_since_last_delinq   # load_data also creates mths_since_last_delinq_missing
+    - mths_since_last_record   # load_data also creates mths_since_last_record_missing
+    - mths_since_last_major_derog  # load_data also creates mths_since_last_major_derog_missing
     - open_acc
     - pub_rec
     - revol_bal
+    - revol_util
     - total_acc
+
+    # ── FICO scores ───────────────────────────────────────────────────────
+    - last_fico_range_high
+    - last_fico_range_low
+
+    # ── Extended credit history ───────────────────────────────────────────
     - collections_12_mths_ex_med
     - acc_now_delinq
     - tot_coll_amt
     - tot_cur_bal
     - total_rev_hi_lim
-    - term
-    - loan_status
-    - issue_d
-  
+    - avg_cur_bal
+    - bc_util
+    - mort_acc
+    - pub_rec_bankruptcies
+    - tax_liens
+    - tot_hi_cred_lim
+    - total_bal_ex_mort
+    - total_bc_limit
+    - total_il_high_credit_limit
+
+  # Lending Club loan years used in the paper methodology
   years: [2013, 2014]
-  incomplete_statuses: [Current]
+
+  # Statuses indicating the loan outcome is not yet settled → exclude
+  incomplete_statuses:
+    - Current
+    - In Grace Period
+    - Late (16-30 days)
+    - "Does not meet the credit policy. Status:Fully Paid"
+    - "Does not meet the credit policy. Status:Charged Off"
+
+  # Post-origination columns that leak future information → drop
   leaked_columns:
     - funded_amnt
     - funded_amnt_inv
@@ -32,27 +87,107 @@ data_settings:
     - last_pymnt_d
     - last_pymnt_amnt
     - next_pymnt_d
+    - total_pymnt
+    - total_pymnt_inv
+    - out_prncp
+    - out_prncp_inv
+    - total_rec_prncp
+    - total_rec_int
+    - total_rec_late_fee
+    - grade        # post-origination risk label (leaks target signal)
+    - sub_grade
 
+# ---------------------------------------------------------------------------
+# Target definition  (consumed by load_data.DataLoader.define_target)
+# ---------------------------------------------------------------------------
 target_settings:
   business:
-    default_statuses: ["Charged Off", "Default"]
-    good_statuses: ["Fully Paid"]
+    default_statuses:
+      - "Charged Off"
+      - "Default"
+      - "Late (31-120 days)"
+    good_statuses:
+      - "Fully Paid"
 
-# TUNED MODEL PARAMETERS
+# ---------------------------------------------------------------------------
+# Feature type lists  (consumed by TabTransformerTrainer.prepare_data)
+#
+# Categorical features are label-encoded and passed through embedding +
+# transformer layers.  Numerical features are median-imputed, scaled, and
+# concatenated directly with the transformer output before the MLP.
+#
+# Note: load_data.py dynamically adds mths_since_last_*_missing columns.
+# TabTransformerTrainer automatically picks those up as numerical even if
+# they are not listed here.
+# ---------------------------------------------------------------------------
+categorical_features:
+  - term
+  - emp_length
+  - home_ownership
+  - verification_status
+  - purpose
+  - addr_state
+  - initial_list_status
+
+numerical_features:
+  # Core financials
+  - loan_amnt
+  - int_rate
+  - annual_inc
+  - dti
+  - delinq_2yrs
+  - inq_last_6mths
+  - open_acc
+  - pub_rec
+  - revol_bal
+  - revol_util
+  - total_acc
+  # FICO
+  - last_fico_range_high
+  - last_fico_range_low
+  # Extended credit history
+  - collections_12_mths_ex_med
+  - acc_now_delinq
+  - tot_coll_amt
+  - tot_cur_bal
+  - total_rev_hi_lim
+  - avg_cur_bal
+  - bc_util
+  - mort_acc
+  - pub_rec_bankruptcies
+  - tax_liens
+  - tot_hi_cred_lim
+  - total_bal_ex_mort
+  - total_bc_limit
+  - total_il_high_credit_limit
+  # Structural missingness columns – filled with 999 by load_data.py
+  # (999 signals "event never happened"; a numeric signal the model can use)
+  - mths_since_last_delinq
+  - mths_since_last_record
+  - mths_since_last_major_derog
+  # Binary missing-indicators added dynamically by load_data.py (0 or 1)
+  - mths_since_last_delinq_missing
+  - mths_since_last_record_missing
+  - mths_since_last_major_derog_missing
+
+# ---------------------------------------------------------------------------
+# Model architecture hyperparameters
+#   heads must be <= num_categorical_features (7 here); 4 is safe.
+#   dim_head * heads gives the inner attention dimension.
+# ---------------------------------------------------------------------------
 model:
-  embedding_dim: 32
-  depth: 4
-  heads: 4
-  dim_head: 32
-  mlp_dim: 256
-  dropout: 0.2
+  embedding_dim: 32      # embedding size per categorical token
+  depth: 4               # number of transformer encoder blocks
+  heads: 4               # multi-head attention heads (≤ 7 categorical features)
+  dim_head: 32           # dimension per attention head  (inner_dim = heads * dim_head = 128)
+  mlp_dim: 256           # hidden size of the feed-forward layers and final MLP
+  dropout: 0.2           # dropout rate applied in attention and feed-forward layers
 
-# TUNED TRAINING PARAMETERS
-batch_size: 128
+# ---------------------------------------------------------------------------
+# Training hyperparameters
+# ---------------------------------------------------------------------------
+batch_size: 256
 epochs: 100
 learning_rate: 0.0005
-early_stopping_patience: 15
 weight_decay: 0.01
-
-numerical_features: []
-categorical_features: []
+early_stopping_patience: 15
