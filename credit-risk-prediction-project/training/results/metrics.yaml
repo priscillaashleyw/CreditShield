@@ -1,11 +1,13 @@
-accuracy: 0.2005
-auc: 0.4928606692818184
-f1: 0.3110728134424817
-false_negatives: 3.0
-false_positives: 1596.0
-mae: 0.5085893273353577
-precision: 0.18446601941747573
-recall: 0.9917582417582418
-threshold: 0.446731835603714
-true_negatives: 40.0
-true_positives: 361.0
+model_type: TabTransformer
+output_type: probability (0=good, 1=default)
+optimal_threshold: 0.6850194931030273
+auc: 0.9274742375469668
+accuracy: 0.8719172633253779
+precision: 0.6019482906506556
+recall: 0.7856857257097161
+f1: 0.6816526173379124
+mae: 0.21161915361881256
+true_positives: 9825
+true_negatives: 52647
+false_positives: 6497
+false_negatives: 2680

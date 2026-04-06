@@ -32,6 +32,19 @@ class DataLoader:
                 self.data_path = raw_path
             else:
                 self.data_path = self.project_root / raw_path
+
+        # Eagerly resolve: if the expected path is actually a directory
+        # (Kaggle unzip can create accepted_2007_to_2018Q4.csv/ as a folder),
+        # find the real CSV inside it now so we never re-trigger a download.
+        if self.data_path.exists() and self.data_path.is_dir():
+            csvs = sorted(
+                self.data_path.rglob("*.csv"),
+                key=lambda p: p.stat().st_size,
+                reverse=True,
+            )
+            if csvs:
+                self.data_path = csvs[0]
+                print(f"Resolved data path to: {self.data_path}")
     
     def _ensure_raw_data(self):
         import shutil
@@ -64,8 +77,6 @@ class DataLoader:
         if len(parts) < 3:
             raise ValueError(f"Invalid Kaggle URI: {self.kaggle_uri}")
 
-        dataset = "/".join(parts[:2])
-        filename = "/".join(parts[2:])
         dataset = "/".join(parts[:2])
         filename = "/".join(parts[2:])
         dest_dir = self.data_path.parent
@@ -119,7 +130,15 @@ class DataLoader:
             observation_date,FEDFUNDS
             observation_date,UNRATE
         """
-        macro_dir = Path(self.config['paths']['external_macro_data'])
+        # Gracefully skip if config doesn't define external macro data path
+        macro_raw = self.config.get('paths', {}).get('external_macro_data')
+        if not macro_raw:
+            print("⚠️ 'paths.external_macro_data' not in config — skipping macro features.")
+            return df
+
+        macro_dir = Path(macro_raw)
+        if not macro_dir.is_absolute():
+            macro_dir = self.project_root / macro_dir
 
         fed_path = macro_dir / "FEDFUNDS.csv"
         unrate_path = macro_dir / "UNRATE.csv"
